@@ -1,0 +1,67 @@
+:root {
+  --pitch: #0f1e16;
+  --pitch-raised: #16281d;
+  --pitch-raised-2: #1c3024;
+  --line: rgba(241, 232, 214, 0.1);
+  --line-strong: rgba(241, 232, 214, 0.18);
+  --cream: #f1e8d6;
+  --cream-dim: #a79c87;
+  --seam: #b23a2e;
+  --seam-bright: #d24a3c;
+  --brass: #d1a954;
+  --brass-dim: #8f7a4c;
+
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--pitch);
+  color: var(--cream);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+}
+
+::selection {
+  background: var(--brass);
+  color: var(--pitch);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 5px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

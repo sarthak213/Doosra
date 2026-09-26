@@ -1,0 +1,8 @@
+backend/data/
+backend/data/raw/
+backend/.pytest_cache/
+*.duckdb
+__pycache__/
+.env
+.venv/
+venv/
