@@ -1,8 +1,10 @@
-# Cricket Agent
+# Doosra
 
-An agentic AI assistant that answers natural-language cricket questions by
-writing and executing SQL against ball-by-ball match data, with a live view
-of its reasoning steps.
+A cricket analytics workbench: player hubs, comparisons, a query builder and
+a player matrix over ball-by-ball data, with context-adjusted metrics (true
+strike rate, match factor, era factor...) and an AI copilot that can explain
+any view or drive the app. Every analytics capability is also an MCP tool, so
+any MCP-capable app (Claude Desktop and others) can use it directly.
 
 Data source: [Cricsheet](https://cricsheet.org/) (free, no auth required).
 
@@ -10,24 +12,101 @@ Data source: [Cricsheet](https://cricsheet.org/) (free, no auth required).
 
 ```text
 backend/
-├── ingest/
-│   └── build_db.py             # parses Cricsheet JSON -> normalized DuckDB tables (batched)
-├── agent/
-│   ├── catalog.py              # name resolution: players, competitions, teams, venues, formats
-│   ├── scope.py                # shared filters (competition/format/team/venue/season/phase...) -> SQL
-│   ├── stats.py                # the analytics engine: player stats, splits, leaderboards, records,
-│   │                           #   team/venue records, matchups -- every scoring rule encoded once
-│   ├── tools.py                # run_sql (guarded), schema, autocomplete search, dataset counts
-│   ├── prompts.py              # system prompt (routing guide + worked examples)
-│   ├── cancellation.py         # in-flight request cancellation registry
-│   └── graph.py                # hand-rolled tool-calling loop with grounding guards
-├── tests/                      # pytest suite (both DB schemas) + eval questions
-├── checkdb.py                  # quick sanity check on the built database
-├── main.py                     # FastAPI app, SSE streaming endpoint
-└── requirements.txt
+├── ingest/build_db.py      # Cricsheet JSON -> normalized DuckDB tables (batched)
+├── analytics/              # the analytics layer (no LLM involved)
+│   ├── db.py               #   the one place that opens the database (read-only)
+│   ├── catalog.py          #   name resolution: players, competitions, teams, venues, formats
+│   ├── scope.py            #   shared filters -> SQL, and the per-ball scoring rules
+│   ├── build.py            #   derived per-innings tables + ball-state expectations
+│   ├── registry.py         #   the metric registry: every metric declared once
+│   ├── engine.py           #   query builder: stats, splits, form, arcs, percentiles, matrix...
+│   └── results.py          #   the result envelope + formatting/highlight helpers
+├── mcp_server/             # every capability as an MCP tool (stdio or HTTP at /mcp)
+├── agent/                  # the copilot
+│   ├── graph.py            #   LangGraph state machine over the MCP tools, grounding guards
+│   ├── prompts.py          #   system prompt (tool routing, filters, worked examples)
+│   ├── stats.py            #   team/venue/matchup/records tools (ball-level SQL)
+│   ├── tools.py            #   guarded run_sql, schema guide, autocomplete search
+│   └── cancellation.py     #   in-flight request cancellation
+├── api/                    # REST endpoints behind the UI views + saved views/watchlist
+├── tests/                  # pytest suite (both DB schemas) + eval questions
+└── main.py                 # FastAPI app: /api, /mcp, SSE chat streams
 
-frontend/                       # React app ("Doosra")
+frontend/                   # React app: Player Hub, Compare, Query, Matrix, Ask + copilot drawer
 ```
+
+The UI, the copilot and external MCP clients all go through the same engine,
+so a number on screen and a number the copilot quotes are the same number.
+
+## Setup
+
+```bash
+cd backend
+pip install -r requirements.txt
+
+# 1. Build the database from Cricsheet JSON (globs recursively)
+python ingest/build_db.py --raw-dir /path/to/cricsheet/json --out data/cricket.duckdb
+
+# 2. Build the derived analytics tables (~1 minute on the full archive)
+python -m analytics.build
+
+# 3. LLM config: copy and edit (LM Studio / Ollama locally, or Groq)
+cp .env.example .env
+
+# 4. Run the API
+uvicorn main:app --reload --port 8000
+```
+
+```bash
+cd frontend
+npm install
+npm run dev          # http://localhost:5173 (expects the API on :8000; override with VITE_API_BASE)
+```
+
+Re-run step 2 whenever the database is re-ingested.
+
+## The views
+
+- **Player Hub** (`/players/:name`) — batting/bowling summary with
+  context-adjusted cards, a rolling-form chart against the career line (with
+  peak and trough windows), percentiles against qualified peers, splits by
+  format/season/opposition/phase/position/entry point/dismissal, an
+  entry-point heatmap, and similar players. Watchlist toggle.
+- **Comparison Studio** (`/compare`) — up to four players on the same
+  filters: side-by-side table, percentile bars, and career arcs aligned by
+  innings number.
+- **Query Builder** (`/query`) — any registry metrics as columns, any
+  filters, sort and qualification, optional split. Save/load queries, CSV
+  export, click through to players.
+- **Player Matrix** (`/matrix`) — every qualified player on two metrics,
+  medians as quadrant lines, standouts labelled, watchlist in brass.
+- **Ask** (`/ask`) — full-page chat.
+- **Copilot drawer** (Ctrl+K, on every view) — knows what you're looking at;
+  every panel has an **Explain** button, and it can open views with settings
+  filled in ("show me the best death bowlers since 2022 in the query builder").
+
+Every view keeps its settings in the URL, so any view is a shareable permalink.
+
+## Metrics
+
+`analytics/registry.py` declares every metric once: SQL over the per-innings
+tables, which direction is better, whether it needs a minimum sample, and a
+plain-English definition (shown in the UI and given to the model). Highlights:
+
+- **True strike rate / true average / runs above expected** — performance
+  against what an average player would have done facing the same situations
+  (format, year, gender, innings, over, wickets down). Bowling equivalents:
+  true economy, true wickets, runs saved.
+- **Match factor** — average divided by the average of every other top-7
+  batter in the same matches (1.0 = par for the conditions). Bowling version too.
+- **Era factor** — average against the same batting position, format and era.
+- **Form** — rolling last-N averages/strike rates/economies with career-to-date lines.
+- Scoring profile (dot %, boundary %, balls per boundary...), reliability
+  (conversion rate, 30+ rate, median, variability), role (position, entry point).
+
+These adjust for match situation, not opposition or pitch quality. Cricsheet
+has no ball tracking or player attributes, so pace-vs-spin, handedness and
+line/length analysis aren't available.
 
 ## How answers stay correct
 
@@ -35,176 +114,170 @@ The model never writes cricket SQL or guesses database spellings for normal
 questions. It picks a tool and passes plain names; everything that decides
 whether a number is right is deterministic, tested code:
 
-- **Name resolution** (`catalog.py`). Cricsheet stores established players
-  by initials ("RG Sharma", "SPD Smith"), so plain fuzzy matching picked
-  obscure namesakes whose names are spelled out in full (the "Rohit Sharma"
-  in the data is an 8-match domestic player). The resolver matches given
+- **Name resolution** (`analytics/catalog.py`). Cricsheet stores established
+  players by initials ("RG Sharma", "SPD Smith"); the resolver matches given
   names to initials and ranks namesakes by how much they've played. It
-  merges competitions split across naming eras (T20 World Cup = "ICC World
-  Twenty20" + "World T20" + "ICC Men's T20 World Cup"), renamed franchises
-  (RCB Bangalore/Bengaluru), and venue spellings. Ambiguous names ("Smith")
-  come back as candidates instead of a silent guess.
-- **Scoring rules** (`stats.py`). Dismissals are counted by the dismissed
-  player (non-striker run-outs), retired hurt isn't a dismissal, wides
-  aren't balls faced, byes aren't the bowler's, and super overs are
-  excluded. Every tool uses the same SQL building blocks, so they can't
-  disagree with each other.
-- **Grounded output** (`graph.py`). Tool results with rows go to the UI as
-  tables straight away. Charts are drawn from those tables by id, so the
-  model never copies numbers into them. An answer that quotes numbers with
-  no data lookup behind it gets sent back once. A `final_answer` sent in the
-  same batch as other tool calls is ignored, and running out of steps still
-  produces an answer.
-- **Stated assumptions**. Every result carries the filters it used and notes
-  (what a name resolved to, qualification thresholds, "defaulted to men's
-  cricket", data-coverage caveats), and the prompt asks the model to state
-  them.
+  merges tournament naming eras (T20 World Cup = "ICC World Twenty20" + "World
+  T20" + "ICC Men's T20 World Cup"), renamed franchises and venue spellings.
+  Ambiguous names come back as candidates, not silent guesses.
+- **Scoring rules** (`analytics/scope.py`, `build.py`). Dismissals are counted
+  by the dismissed player (non-striker run-outs), retired hurt isn't a
+  dismissal, wides aren't balls faced, byes aren't the bowler's, and super
+  overs are excluded (as in official records).
+- **Grounded output** (`agent/graph.py`). Tool results go to the UI as tables
+  straight away; charts are drawn from those tables by id; an answer quoting
+  numbers with no data behind it (a lookup or the on-screen view) is sent
+  back once; a premature `final_answer` is ignored; hitting the step limit
+  still produces an answer.
+- **Stated assumptions.** Every result carries the filters it used and notes
+  (what a name resolved to, qualification thresholds, defaults, coverage).
 
-## Backend setup
+## The copilot
 
-```bash
-cd backend
-pip install -r requirements.txt
+`agent/graph.py` is a LangGraph state machine (`agent` → `tools` → `agent`...,
+with a `wrap_up` node at the step limit). It lists and calls tools through an
+in-memory MCP client session against `mcp_server/server.py`, adds three
+app-only tools (`plot_chart`, `open_in_app`, `final_answer`), and talks to
+any OpenAI-compatible endpoint (LM Studio, Ollama, Groq — see `.env.example`).
+Events stream to the UI over SSE (`POST /api/chat/stream`, which also carries
+the current view as context; `GET /query/stream` for plain chat).
 
-# 1. Point build_db.py at wherever your Cricsheet JSON files live (it globs
-#    recursively, so one folder with everything in it, or subfolders per
-#    tournament/format, both work fine)
-python ingest/build_db.py --raw-dir /path/to/your/cricsheet/json --out data/cricket.duckdb
+With a local Qwen3-14B, expect roughly 30–120s per question with thinking on
+(`LLM_THINKING=on`, the default); turning it off is faster but it picks the
+wrong tool more often.
 
-# 2. Copy .env.example to .env and fill in your LLM config
-#    (Groq free tier: https://console.groq.com)
-cp .env.example .env
+## Using the tools from other apps (MCP)
 
-# 3. Run the API
-uvicorn main:app --reload --port 8000
+Any app that speaks the Model Context Protocol can use the same 18 tools. The
+server offers two transports:
+
+| Transport | Endpoint | Needs the API running? | Use when |
+|---|---|---|---|
+| **stdio** | the client launches `python -m mcp_server` itself | No | Simplest; the client manages the process |
+| **HTTP** (streamable) | `http://localhost:8000/mcp` | Yes (`uvicorn main:app --port 8000`) | You already run the app, or several clients should share one server |
+
+Neither transport needs the LLM: the tools are pure analytics. For any MCP
+client, point it at one of:
+
+- **stdio:** command `C:/path/to/Doosra/backend/.venv/Scripts/python.exe`,
+  arguments `-m mcp_server`, environment `PYTHONPATH=C:/path/to/Doosra/backend`
+- **HTTP:** `http://localhost:8000/mcp` (streamable HTTP)
+
+In the examples below, replace `C:/path/to/Doosra` with your checkout (forward
+slashes work on Windows). The database must exist and the analytics tables
+must be built (`python -m analytics.build`).
+
+### Example: Claude Desktop
+
+Open **Settings → Developer → Edit Config** to open
+`claude_desktop_config.json` (on Windows it's in `%APPDATA%\Claude\`), add one
+of the entries below, then fully quit and restart Claude Desktop. The tools
+appear under the tools (slider) icon in the chat box.
+
+**stdio:**
+
+```json
+{
+  "mcpServers": {
+    "doosra": {
+      "command": "C:/path/to/Doosra/backend/.venv/Scripts/python.exe",
+      "args": ["-m", "mcp_server"],
+      "env": { "PYTHONPATH": "C:/path/to/Doosra/backend" }
+    }
+  }
+}
 ```
 
-Since the database now spans every tournament and format you have locally,
-`matches.event_name` distinguishes competitions (IPL, Big Bash League, World
-Cups, etc.) separately from `matches.match_type` (the format: Test/ODI/T20).
-The agent is prompted to filter on `event_name` when a question names a
-specific tournament.
+**HTTP:** the config file only launches local processes, and Desktop's
+**Settings → Connectors → Add custom connector** only accepts publicly
+reachable `https` URLs, not `localhost`. So for the local HTTP server, bridge it
+with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) (needs Node.js;
+`npx` fetches it on first run). Start the API first, then add:
 
-Test it:
-
-```bash
-curl "http://localhost:8000/query/stream?q=who%20scored%20the%20most%20runs"
+```json
+{
+  "mcpServers": {
+    "doosra": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"]
+    }
+  }
+}
 ```
 
-You should see a stream of `data: {...}` events — thoughts, tool calls, tool
-results, and a final `final_answer` event.
+If you deploy the API somewhere public over `https`, add
+`https://your-host/mcp` directly as a custom connector instead.
 
-## How the agent loop works
+### Checking the server yourself
 
-`agent/graph.py` implements a plain tool-calling loop (no LangGraph/CrewAI
-dependency) so every step is transparent and emits an event:
+The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) lists
+the tools and lets you call them by hand:
 
-1. Send the question + system prompt to the LLM with tool schemas attached
-2. If the model calls a tool (`player_stats`, `compare_players`,
-   `leaderboard`, `top_performances`, `team_stats`, `venue_stats`, `matchup`,
-   `lookup`, `run_sql`), run it and emit the call and result as events.
-   Results with rows also go out as `table` events (ids T1, T2...), and the
-   model gets them as records
-3. If a tool call errors (bad SQL, an ambiguous name with candidates), the
-   error is fed back to the model so it can self-correct. This is emitted as
-   a distinct `self_correction` event so the frontend can highlight it
-4. `plot_chart` draws from a table id, and the chart goes out as a `chart`
-   event
-5. When the model calls `final_answer`, the loop ends and yields the answer
+```bash
+npx @modelcontextprotocol/inspector
+```
 
-For a local model like Qwen3-14B, expect roughly 30–90s per question with
-thinking on (`LLM_THINKING=on`, the default). Turning it off is faster, but
-in testing it picked the wrong tool more often and misread results.
+Pick **Streamable HTTP** with URL `http://localhost:8000/mcp`, or **STDIO**
+with command `C:/path/to/Doosra/backend/.venv/Scripts/python.exe`, arguments
+`-m mcp_server` and a `PYTHONPATH` environment variable set to the `backend`
+folder.
 
-`main.py` wraps this generator in a Server-Sent Events response so the React
-frontend can render each step as it happens.
+### Troubleshooting
+
+- **HTTP returns 421 "Invalid Host header"**: the server only accepts
+  `localhost` host names (DNS-rebinding protection). Use
+  `http://localhost:8000/mcp`, not a LAN IP or custom host name.
+- **"No module named mcp_server"** (stdio): `PYTHONPATH` isn't pointing at
+  the `backend` folder.
+- **Tools report the analytics tables aren't built**: run
+  `python -m analytics.build` from `backend/`.
 
 ## Security notes
 
-`tools.run_sql` only permits `SELECT`/`WITH` statements and rejects any query
-containing `INSERT`, `UPDATE`, `DELETE`, `DROP`, etc. (string literals are
-stripped first, so a team or venue name containing a blocked word doesn't
-false-positive). The DuckDB connection is also opened read-only **with
-external access disabled**, so table functions like `read_csv`/`read_text`
-can't be used to read files on the server from inside a SELECT. For public
-deployments, note the remaining gaps: the in-memory rate limiter and the
-request-id cancellation registry are per-process only (a reverse proxy or
-Redis-backed limiter is needed across multiple workers).
-
-## Multi-turn conversations, cancellation, and persistence
-
-The frontend sends prior turns (`history`) with each `/query/stream` request,
-so follow-up questions like "what about in Tests?" work. Each request also
-carries a `request_id`; the Stop button hits `POST /query/cancel/<request_id>`
-so the backend actually stops the agent loop rather than just dropping the
-browser connection. Turns persist to `localStorage` (last 20) and a
-"Clear history" button wipes them.
+`run_sql` only permits `SELECT`/`WITH` statements and rejects write keywords
+(string literals are stripped first, so a venue named "Drop Zone" doesn't
+false-positive). Every connection is read-only **with external access
+disabled**, so `read_csv`/`read_text` can't read server files from a SELECT.
+Filter values reaching SQL are resolved database values or validated
+integers, inlined as escaped literals. Saved views and the watchlist live in
+a separate SQLite file (`data/workspace.db`). The rate limiter and
+cancellation registry are per-process; a public deployment needs shared ones.
 
 ## Tests and eval
 
 ```bash
 cd backend
-pip install pytest
-pytest                       # deterministic tests: scoring rules, SQL guard, agent pieces
+pytest                  # ~415 tests: scoring rules, derived tables, engine, API, MCP, agent graph
+pytest -m llm           # LLM-in-the-loop eval (needs a model endpoint)
 ```
 
 The fixture tests build a small synthetic database through the real ingest
-path and run every scoring-rule test against **both** database schemas (the
-current one and the older one without `deliveries_wickets`), plus the agent
-loop with a scripted fake LLM.
+and analytics-build path, and run against **both** database schemas (the
+current one and the older one without `deliveries_wickets`). Context metrics
+are also checked against invariants that hold by construction (runs above
+expected sum to zero across all batters). The agent graph is tested with a
+scripted fake LLM against the real MCP tools.
 
-`tests/eval_fixtures/eval_questions.json` holds 40 natural-language
-questions with expected values computed by independent SQL. The
-deterministic checks run the stats tools directly against the built
-database (skipped if `data/cricket.duckdb` is absent). To run the LLM-in-the-loop eval (spends
-API credits, needs a key):
-
-```bash
-pytest -m llm tests/test_llm_eval.py
-```
+`tests/eval_fixtures/eval_questions.json` holds 40 questions with expected
+values computed by independent SQL, checked against the real database.
 
 ## Next steps
 
-- Re-ingest `data/cricket.duckdb` with the current `build_db.py`: per-type
-  extra columns and the `deliveries_wickets` table enable exact
-  multi-extra/multi-wicket scoring and **fielding stats** (catches,
-  stumpings, run-outs). Until then the tools fall back to the old-schema
-  approximation, and fielding questions return an explanatory error
-- Cricsheet `people.csv` registry, to tell apart two different players who
-  share the same name
-- Deploy: frontend on Vercel, backend on Render/Railway/HF Spaces (bring a
-  shared rate limiter + `CORS_ORIGINS` env var)
+- Match Centre (worm, Manhattan, win-probability model, key moments, impact)
+- Matchup grid + auto-written pre-match reports
+- Venue, team and tournament dashboards; a scouting board with league-strength adjustment
+- Tool-use fine-tune of a small local model for speed
+- Re-ingest with the current `build_db.py` for exact multi-wicket balls and fielding stats
+- Single-installer desktop app
 
-## Frontend setup
+## Licence
 
-The frontend is "Doosra" — a React app in `frontend/`, styled around a
-cricket-pitch/scoreboard visual identity (deep pitch green, brass/seam
-accents, Fraunces + IBM Plex type). It talks to the backend's SSE endpoint
-and renders the agent's live reasoning trace, final answer, chart, and
-table.
+Copyright (c) 2026 sarthak213. All rights reserved.
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+Doosra is proprietary software, not open source. No licence is granted to
+use, copy, modify, distribute or host it without the copyright holder's prior
+written permission -- see [LICENSE](LICENSE).
 
-Opens at `http://localhost:5173` by default. It expects the backend running
-at `http://localhost:8000` — override with a `.env` file containing
-`VITE_API_BASE=http://your-backend-url` if needed.
-
-Key files:
-
-- `src/hooks/useAgentQuery.js` — manages the `EventSource` connection to
-  `/query/stream` and assembles each turn's steps/answer/chart/table as
-  events arrive
-- `src/components/ReasoningTrace.jsx` — the collapsible live trace,
-  auto-expanded while a turn is streaming
-- `src/components/TableView.jsx` — renders each `table` event (title, the
-  filters applied, caveat notes) as soon as the tool returns
-- `src/components/ChartView.jsx` — renders `chart` events; several metrics
-  are drawn as separate small charts, never on one shared axis
-
-`npm run build` produces a static `dist/` you can deploy anywhere (Vercel,
-Netlify, etc.) — just make sure `VITE_API_BASE` points at your deployed
-backend.
+Cricket data comes from [Cricsheet](https://cricsheet.org) and remains
+subject to Cricsheet's own licence terms, which require attribution.
+Third-party libraries and fonts keep their own licences.

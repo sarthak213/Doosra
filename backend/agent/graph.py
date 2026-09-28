@@ -1,80 +1,66 @@
 """
-The agent's reasoning loop.
+The copilot agent: a LangGraph state machine over Doosra's MCP tools.
 
-Deliberately hand-rolled (rather than a framework's prebuilt ReAct agent) so
-every step can be emitted as an event for the frontend's live reasoning
-trace, and so the loop itself is easy to follow.
+    START -> agent --(tool calls)--> tools --> agent ... --> END
+               |                       \\
+               |                        `-(step limit)--> wrap_up --> END
+               `--(plain text quoting numbers, no lookup yet)--> agent (once)
 
-Uses the OpenAI SDK against any OpenAI-compatible chat completions endpoint,
-so the same code runs against Groq (hosted), Ollama or LM Studio (local) --
-just change environment variables.
+* Tools come from the MCP server (mcp_server/server.py) through an
+  in-memory MCP client session -- the same tool definitions Claude Desktop
+  or any other MCP client sees. Three app-only tools are added here:
+  plot_chart (draw from a result table), open_in_app (drive the UI) and
+  final_answer.
+* The model is any OpenAI-compatible endpoint (LM Studio, Ollama, Groq).
+* Grounding guards: tables go to the UI straight from tool output; charts
+  are built from those tables by id, never from numbers the model typed;
+  an answer quoting numbers with no data lookup is sent back once; a
+  final_answer issued before the results it depends on is ignored; the step
+  limit ends with a best-effort answer instead of an error.
+* Copilot context: the UI can send what the user is looking at (view,
+  filters, visible data); the agent answers questions about it from that.
 
-Configure via environment variables (see .env.example):
-    LLM_PROVIDER        -- "groq" | "ollama" | "lmstudio" (default: "groq")
-    LLM_BASE_URL        -- override the endpoint directly instead of using a preset
-    LLM_MODEL           -- override the model name directly instead of using a preset
-    LLM_TIMEOUT_SECONDS -- per-request timeout (default 60 hosted, 180 local)
-    LLM_THINKING        -- "off" to disable Qwen3-style thinking (faster), default "on"
-    GROQ_API_KEY        -- required only when LLM_PROVIDER=groq
+Configuration (see .env.example): LLM_PROVIDER, LLM_BASE_URL, LLM_MODEL,
+LLM_TIMEOUT_SECONDS, LLM_THINKING, GROQ_API_KEY.
 
-Design choices that keep answers grounded:
-  * Tools take plain names and resolve them deterministically (catalog.py),
-    so the model never chains exact-string lookups -- the main source of
-    wrong answers before.
-  * Tabular tool results get an id ("T1") and are sent to the frontend as
-    tables immediately; charts are drawn from those tables by id, so numbers
-    shown to the user never pass through the model's transcription.
-  * Answers containing numbers with no data lookup behind them are pushed
-    back once; a final_answer issued before seeing results is ignored; the
-    step limit ends with a best-effort answer rather than an error.
-
-Event types yielded by run_agent():
-    {"type": "thought", "content": str}
-    {"type": "tool_call", "tool": str, "input": dict}
-    {"type": "tool_result", "tool": str, "output": Any}
-    {"type": "self_correction", "content": str}
-    {"type": "table", "table_id": str, "table_data": dict}
-    {"type": "chart", "chart_data": dict}
-    {"type": "final_answer", "content": str, "chart_data": None, "table_data": None}
-    {"type": "error", "content": str}
+Event types streamed by run_agent():
+    thought, tool_call, tool_result, self_correction, table, chart,
+    ui_action, final_answer, error
 """
+
+from __future__ import annotations
 
 import asyncio
 import datetime as dt
 import json
+import operator
 import os
 import re
-from typing import AsyncGenerator
+from typing import Annotated, AsyncGenerator, TypedDict
 
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, StateGraph
+from mcp.shared.memory import create_connected_server_and_client_session
 from openai import AsyncOpenAI
 
-from . import cancellation, catalog, stats, tools
+from analytics import catalog
+from analytics.results import is_table, to_records
+from analytics.scope import FILTER_ALIASES, FILTER_ARGS
+
+from . import cancellation
 from .prompts import build_system_prompt
 
 TOOL_TIMEOUT_SECONDS = 30.0
 MAX_TOOL_ROUNDS = 8
 MAX_ROWS_TO_MODEL = 25
 MAX_HISTORY_MESSAGES = 8
+MAX_CONTEXT_CHARS = 6000
 
 _PROVIDER_PRESETS = {
-    "groq": {
-        "base_url": "https://api.groq.com/openai/v1",
-        "model": "llama-3.3-70b-versatile",
-        "api_key_env": "GROQ_API_KEY",
-        "timeout": 60.0,
-    },
-    "ollama": {
-        "base_url": "http://localhost:11434/v1",
-        "model": "qwen3:14b",
-        "api_key_env": None,  # Ollama doesn't check the key
-        "timeout": 180.0,
-    },
-    "lmstudio": {
-        "base_url": "http://localhost:1234/v1",
-        "model": "local-model",  # LM Studio ignores this if only one model is loaded
-        "api_key_env": None,
-        "timeout": 180.0,
-    },
+    "groq": {"base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile",
+             "api_key_env": "GROQ_API_KEY", "timeout": 60.0},
+    "ollama": {"base_url": "http://localhost:11434/v1", "model": "qwen3:14b", "api_key_env": None, "timeout": 180.0},
+    "lmstudio": {"base_url": "http://localhost:1234/v1", "model": "local-model", "api_key_env": None, "timeout": 180.0},
 }
 
 _provider = os.environ.get("LLM_PROVIDER", "groq").lower()
@@ -84,171 +70,90 @@ BASE_URL = os.environ.get("LLM_BASE_URL", _preset["base_url"])
 MODEL = os.environ.get("LLM_MODEL", _preset["model"])
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", _preset["timeout"]))
 THINKING = os.environ.get("LLM_THINKING", "on").lower() not in ("off", "0", "false", "no")
-
-# api_key falls back to a placeholder so the module can be imported before a
-# real key is set; the real error surfaces as an {"type": "error"} event.
 _api_key_env = _preset["api_key_env"]
 _api_key = os.environ.get(_api_key_env, "unset") if _api_key_env else "not-needed"
 
-# One retry: a local model that timed out once will usually time out again,
-# and three silent attempts made the UI look hung for minutes.
+# One retry: a local model that timed out once will usually time out again.
 client = AsyncOpenAI(base_url=BASE_URL, api_key=_api_key, timeout=LLM_TIMEOUT_SECONDS, max_retries=1)
 
 
 # ---------------------------------------------------------------------------
-# Tool schemas
+# Tools: MCP tools + app-only tools
 # ---------------------------------------------------------------------------
-
-_FILTER_PROPS = {
-    "competition": {"type": "string", "description": "Tournament/league in plain words: 'IPL', 'T20 World Cup', 'World Cup', 'Ashes', 'BBL', 'WPL'. A year inside it ('IPL 2016') sets the season. Omit for all cricket."},
-    "format": {"type": "string", "description": "'Test', 'ODI', 'T20I' (official internationals), 'T20' (all T20 incl. leagues), 'first-class', 'List A' or 'international'."},
-    "gender": {"type": "string", "description": "'male', 'female' or 'all'. Set 'female' for women's cricket; otherwise leave unset."},
-    "team": {"type": "string", "description": "Team the player played for / the team in question, in plain words ('India', 'RCB', 'Mumbai Indians')."},
-    "opposition": {"type": "string", "description": "Opponent team in plain words."},
-    "venue": {"type": "string", "description": "Ground (or city) in plain words: 'Eden Gardens', 'MCG', 'Chinnaswamy', 'Lord's'."},
-    "season": {"type": "string", "description": "One season: '2024' or '2023/24'."},
-    "from_year": {"type": "integer", "description": "First calendar year to include."},
-    "to_year": {"type": "integer", "description": "Last calendar year to include."},
-    "phase": {"type": "string", "description": "'powerplay', 'middle' or 'death' (limited-overs only)."},
-    "innings": {"type": "integer", "description": "1 = batting first, 2 = chasing (Tests: 1-4)."},
-}
-
-
-def _filters(*exclude: str) -> dict:
-    return {k: v for k, v in _FILTER_PROPS.items() if k not in exclude}
-
 
 def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
     return {"type": "function", "function": {
         "name": name, "description": description,
-        "parameters": {"type": "object", "properties": properties, "required": required},
-    }}
+        "parameters": {"type": "object", "properties": properties, "required": required}}}
 
 
-_ROLE = {"type": "string", "enum": ["batting", "bowling", "fielding"]}
-
-TOOL_SCHEMAS = [
-    _fn("player_stats",
-        "One player's batting, bowling or fielding figures in any scope (matches, runs, average, strike rate, "
-        "hundreds, economy, best figures...). Use split_by for breakdowns: season-by-season trends, by format, "
-        "by opposition, by phase, etc. Pass the name as the user wrote it.",
-        {"player": {"type": "string"}, "role": _ROLE,
-         "split_by": {"type": "string", "enum": list(stats.SPLITS)}, **_filters()},
-        ["player", "role"]),
-    _fn("compare_players",
-        "Full figures for two or more players side by side in the same scope. Use for any comparison of players.",
-        {"players": {"type": "array", "items": {"type": "string"}}, "role": _ROLE, **_filters()},
-        ["players", "role"]),
-    _fn("leaderboard",
-        "Rank players or teams by a metric: 'most runs', 'best economy', 'most sixes', 'most wins at a venue'... "
-        "Rate metrics (average, strike_rate, economy...) apply a sensible minimum-balls qualification automatically. "
-        "Batting metrics: runs, average, strike_rate, sixes, fours, hundreds, fifties, ducks, boundary_pct, dot_pct, "
-        "balls_per_six. Bowling: wickets, economy, average, strike_rate, dot_pct, maidens, five_wkt_hauls, "
-        "four_wkt_hauls. Fielding: catches, stumpings, run_outs, dismissals. Team: wins, win_pct, matches, losses.",
-        {"role": {"type": "string", "enum": ["batting", "bowling", "fielding", "team"]},
-         "metric": {"type": "string"},
-         "limit": {"type": "integer", "description": "How many to list (default 10)."},
-         "min_balls": {"type": "integer", "description": "Override the qualification (balls faced/bowled)."},
-         "min_matches": {"type": "integer", "description": "Team win_pct qualification (default 10)."},
-         **_filters()},
-        ["role", "metric"]),
-    _fn("top_performances",
-        "Record lists: highest individual scores (kind='batting_innings'), best bowling figures in an innings "
-        "('bowling_figures'), or highest/lowest team totals ('team_total'). Optionally for one player.",
-        {"kind": {"type": "string", "enum": ["batting_innings", "bowling_figures", "team_total"]},
-         "order": {"type": "string", "enum": ["highest", "lowest"]},
-         "player": {"type": "string"},
-         "limit": {"type": "integer"}, **_filters()},
-        ["kind"]),
-    _fn("team_stats",
-        "A team's results: matches, won, lost, win %, wins batting first vs chasing, tosses, recent results. Give "
-        "an opposition for a head-to-head record. split_by for season-by-season or by format/opposition/venue.",
-        {"team": {"type": "string"}, "opposition": {"type": "string"},
-         "split_by": {"type": "string", "enum": ["season", "year", "format", "competition", "opposition", "venue"]},
-         **_filters("team", "opposition")},
-        ["team"]),
-    _fn("venue_stats",
-        "How a ground plays, per format: matches, average 1st and 2nd innings scores, wins batting first vs "
-        "chasing, toss decisions, highest total.",
-        {"venue": {"type": "string"}, **_filters("venue")},
-        ["venue"]),
-    _fn("matchup",
-        "Batter vs bowler: balls, runs, dismissals, strike rate. Give both names for one matchup; give only a "
-        "batter to list the bowlers who dismissed them most, or only a bowler for the batters they dismissed most.",
-        {"batter": {"type": "string"}, "bowler": {"type": "string"},
-         "limit": {"type": "integer"}, "min_balls": {"type": "integer"}, **_filters()},
-        []),
-    _fn("lookup",
-        "Show how a name resolves in the database, with candidates. Only needed when a stats tool reported an "
-        "ambiguous or unknown name.",
-        {"kind": {"type": "string", "enum": ["player", "team", "venue", "competition"]}, "name": {"type": "string"}},
-        ["kind", "name"]),
-    _fn("run_sql",
-        "Read-only SQL (SELECT/WITH) for questions the tools above don't cover -- dismissal types, player-of-the-"
-        "match counts, extras, toss trends, etc. " + tools.SQL_GUIDE,
-        {"query": {"type": "string"}},
-        ["query"]),
+LOCAL_TOOLS = [
     _fn("plot_chart",
-        "Draw a chart from a table you already have, by its table_id (e.g. 'T1'). Use for trends (line) and "
-        "comparisons (bar). The chart is built from the table's real values.",
+        "Draw a chart from a result table by its table_id (e.g. 'T1'): line for trends over time, bar for "
+        "comparisons. The chart uses the table's real values.",
         {"table_id": {"type": "string"},
-         "x": {"type": "string", "description": "Column name for the x-axis/categories, e.g. 'season' or 'player'."},
-         "y": {"type": "array", "items": {"type": "string"}, "description": "One or more numeric column names."},
+         "x": {"type": "string", "description": "Column for the x-axis, e.g. 'season', 'innings_no', 'player'."},
+         "y": {"type": "array", "items": {"type": "string"}, "description": "Numeric column(s) to plot."},
          "type": {"type": "string", "enum": ["line", "bar"]},
          "title": {"type": "string"}},
         ["table_id", "x", "y"]),
+    _fn("open_in_app",
+        "Open a view in the app with its settings filled in, when the user asks to 'show', 'open' or 'set up' "
+        "something. view: 'query' (Query Builder -- role, metrics, sort_by, split_by, min_balls, filters), "
+        "'matrix' (role, x, y, filters), 'player' (player, filters), 'compare' (players, role, filters).",
+        {"view": {"type": "string", "enum": ["query", "matrix", "player", "compare"]},
+         "state": {"type": "object", "description": "Settings for the view, using the same names as the tools."}},
+        ["view", "state"]),
 ]
-
-FINAL_ANSWER_SCHEMA = _fn(
-    "final_answer",
-    "Give the user your answer once you have the data. Every number must come from tool results.",
-    {"answer": {"type": "string", "description": "Markdown answer: direct answer first, then brief support and caveats."}},
-    ["answer"],
-)
-
-ALL_TOOLS = TOOL_SCHEMAS + [FINAL_ANSWER_SCHEMA]
-
-TOOL_IMPLS = {
-    "player_stats": stats.player_stats,
-    "compare_players": stats.compare_players,
-    "leaderboard": stats.leaderboard,
-    "top_performances": stats.top_performances,
-    "team_stats": stats.team_stats,
-    "venue_stats": stats.venue_stats,
-    "matchup": stats.matchup,
-    "lookup": stats.lookup,
-    "run_sql": lambda query: tools.run_sql(query),
-    # plot_chart is handled inside the loop (it needs the run's tables).
-    "plot_chart": None,
-}
-
-# Argument names small models commonly reach for, mapped onto ours.
-_ARG_ALIASES = {
-    "tournament": "competition", "event": "competition", "event_name": "competition", "league": "competition",
-    "match_type": "format", "stat_type": "role", "type_of_stats": "role", "name": "player",
-    "year": "season", "ground": "venue", "stadium": "venue", "against": "opposition", "vs": "opposition",
-    "team1": "team", "team2": "opposition", "n": "limit", "top": "limit", "top_n": "limit", "sql": "query",
-}
+FINAL_ANSWER = _fn("final_answer", "Give the user your answer once you have the data. Every number must come "
+                   "from tool results.",
+                   {"answer": {"type": "string", "description": "Markdown: direct answer first, then brief support."}},
+                   ["answer"])
+APP_VIEWS = ("query", "matrix", "player", "compare")
 
 
-def _clean_args(name: str, args: dict) -> dict:
-    """Map alias argument names, drop empty values and anything the tool
-    doesn't accept (so a stray argument can't crash the call)."""
-    schema = next((t for t in ALL_TOOLS if t["function"]["name"] == name), None)
-    if schema is None:
-        return args
-    allowed = schema["function"]["parameters"]["properties"]
+def _strip_titles(schema):
+    """Drop pydantic 'title' noise from JSON schemas to save prompt tokens."""
+    if isinstance(schema, dict):
+        return {k: _strip_titles(v) for k, v in schema.items() if k != "title"}
+    if isinstance(schema, list):
+        return [_strip_titles(v) for v in schema]
+    return schema
+
+
+def mcp_tools_to_openai(mcp_tools) -> list[dict]:
+    """MCP tool listings -> OpenAI function schemas. The long filters
+    description is documented once in the system prompt instead."""
+    out = []
+    for t in mcp_tools:
+        params = _strip_titles(t.inputSchema)
+        if "filters" in params.get("properties", {}):
+            params["properties"]["filters"] = {"type": "object", "description": "Optional filters (see system prompt)."}
+        out.append({"type": "function", "function": {"name": t.name, "description": t.description or "",
+                                                      "parameters": params}})
+    return out
+
+
+_ARG_ALIASES = {"name": "player", "stat_type": "role", "n": "limit", "top": "limit", "top_n": "limit",
+                "sql": "query", "sort_by": "metric"}
+
+
+def _clean_args(name: str, args: dict, schema: dict | None) -> dict:
+    """Make a model's arguments fit the tool: drop empties, map common alias
+    names, and move filter keys given at the top level into `filters`."""
+    props = (schema or {}).get("properties", {})
+    filters = dict(args["filters"]) if isinstance(args.get("filters"), dict) else {}
     out = {}
     for k, v in (args or {}).items():
-        key = k if k in allowed else _ARG_ALIASES.get(k, k)
-        if key not in allowed or v is None or v == "" or (isinstance(v, str) and v.lower() in ("null", "none")):
+        if k == "filters" or v is None or v == "" or (isinstance(v, str) and v.lower() in ("null", "none")):
             continue
-        if isinstance(v, str) and v.strip().lower() in ("all", "both", "any", "n/a", "overall"):
-            # "all" means "no filter" -- except gender, where it's meaningful.
-            if key == "gender":
-                out[key] = "all"
-            continue
-        out.setdefault(key, v)
+        key = k if k in props else _ARG_ALIASES.get(k, k)
+        if key in props:
+            out.setdefault(key, v)
+        elif "filters" in props and (k in FILTER_ARGS or k in FILTER_ALIASES):
+            filters.setdefault(k, v)
+    if filters and "filters" in props:
+        out["filters"] = filters
     return out
 
 
@@ -256,31 +161,33 @@ def _clean_args(name: str, args: dict) -> dict:
 # Result handling
 # ---------------------------------------------------------------------------
 
-def _is_table(output) -> bool:
-    return isinstance(output, dict) and isinstance(output.get("columns"), list) and isinstance(output.get("rows"), list)
+def _nested_tables(output) -> list[dict]:
+    """Tables inside a result: the result itself, or player_profile's
+    per-discipline summary/by-format tables."""
+    if is_table(output):
+        return [output] if output["rows"] else []
+    found = []
+    if isinstance(output, dict):
+        for role in ("batting", "bowling"):
+            part = output.get(role)
+            if isinstance(part, dict):
+                found += [t for t in (part.get("summary"), part.get("by_format")) if is_table(t) and t["rows"]]
+    return found
 
 
-def _for_model(output, table_id: str | None):
-    """Compact, model-friendly view of a tool result: rows as records (far
-    less error-prone for a small model to read than parallel arrays)."""
-    if not _is_table(output):
-        return output
-    cols = output["columns"]
-    rows = output["rows"]
-    view = {"table_id": table_id}
-    for k in ("title", "filters", "highlights", "notes", "error"):
-        if output.get(k):
-            view[k] = output[k]
-    view["rows"] = [dict(zip(cols, r)) for r in rows[:MAX_ROWS_TO_MODEL]]
-    if len(rows) > MAX_ROWS_TO_MODEL:
-        view["rows_not_shown"] = len(rows) - MAX_ROWS_TO_MODEL
-    if not rows:
-        view["rows"] = []
-        view["empty"] = True
-    for k in ("recent_results", "player"):
-        if output.get(k):
-            view[k] = output[k]
-    return view
+def _for_model(name: str, output, table_ids: list[str]):
+    if is_table(output):
+        return to_records(output, table_ids[0] if table_ids else None, MAX_ROWS_TO_MODEL, tail=name == "player_form")
+    if isinstance(output, dict) and _nested_tables(output):
+        view = {k: v for k, v in output.items() if k not in ("batting", "bowling")}
+        ids = iter(table_ids)
+        for role in ("batting", "bowling"):
+            part = output.get(role)
+            if isinstance(part, dict):
+                view[role] = {key: to_records(part[key], next(ids, None), MAX_ROWS_TO_MODEL)
+                              for key in ("summary", "by_format") if is_table(part.get(key)) and part[key]["rows"]}
+        return view
+    return output
 
 
 def _build_chart(args: dict, tables: dict) -> dict:
@@ -299,7 +206,6 @@ def _build_chart(args: dict, tables: dict) -> dict:
     if missing or not ys:
         return {"error": f"y column(s) {missing or ys} not in {table_id}. Columns: {cols}"}
     xi = cols.index(x)
-    labels = [str(r[xi]) for r in table["rows"]]
     series = []
     for y in ys:
         yi = cols.index(y)
@@ -307,12 +213,11 @@ def _build_chart(args: dict, tables: dict) -> dict:
         if all(v is None for v in values):
             return {"error": f"Column '{y}' has no numeric values to plot."}
         series.append({"name": y, "values": values})
-    chart_type = args.get("type") or ("line" if x in ("season", "year") else "bar")
     return {
-        "type": chart_type,
+        "type": args.get("type") or ("line" if x in ("season", "year", "innings_no") else "bar"),
         "title": args.get("title") or table.get("title"),
-        "x": labels,
-        "y": series[0]["values"],  # single-series shape older frontends understand
+        "x": [str(r[xi]) for r in table["rows"]],
+        "y": series[0]["values"],
         "series": series,
         "x_label": x,
         "y_label": ys[0] if len(ys) == 1 else None,
@@ -335,177 +240,261 @@ def _sanitize_history(history: list | None) -> list[dict]:
     return out
 
 
+def _context_block(context: dict | None) -> str:
+    if not context:
+        return ""
+    text = json.dumps(context, default=str)
+    if len(text) > MAX_CONTEXT_CHARS:
+        text = text[:MAX_CONTEXT_CHARS] + " ...(truncated)"
+    return ("\n\nWhat the user is looking at in the app right now (view, settings and visible data):\n" + text +
+            "\nAnswer questions about this view from this data where it suffices; call tools for anything else.")
+
+
 # ---------------------------------------------------------------------------
-# The loop
+# The graph
 # ---------------------------------------------------------------------------
 
-async def _complete(messages: list[dict], with_tools: bool = True):
+class AgentState(TypedDict, total=False):
+    messages: Annotated[list, operator.add]
+    pending: list          # tool calls from the last model turn
+    final: str | None
+    rounds: int
+    data_calls: int
+    nudged: bool
+    tables: dict           # table_id -> table
+    seen: dict             # call signature -> output (duplicate calls are short-circuited)
+    done: bool
+
+
+async def _complete(messages: list[dict], tools: list[dict] | None):
+    """One chat completion. Tests replace this with a scripted fake."""
     kwargs = {"model": MODEL, "messages": messages, "temperature": 0}
-    if with_tools:
-        kwargs["tools"] = ALL_TOOLS
+    if tools:
+        kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
     return await client.chat.completions.create(**kwargs)
 
 
-def _system_prompt() -> str:
+def _cancelled(config) -> bool:
+    return cancellation.is_cancelled(config["configurable"].get("request_id"))
+
+
+async def agent_node(state: AgentState, config) -> dict:
+    emit = get_stream_writer()
+    if _cancelled(config):
+        emit({"type": "error", "content": "Cancelled by user."})
+        return {"done": True}
+    try:
+        response = await _complete(state["messages"], config["configurable"]["openai_tools"])
+    except Exception as e:  # noqa: BLE001
+        emit({"type": "error", "content": f"LLM request failed: {e}"})
+        return {"done": True}
+
+    message = response.choices[0].message
+    content = _clean_text(message.content)
+    calls = message.tool_calls or []
+    rounds = state.get("rounds", 0) + 1
+
+    if not calls:
+        # Plain text is the answer -- unless it quotes numbers with no lookup
+        # behind it. On-screen view data counts as a source (Explain mode).
+        has_source = state.get("data_calls", 0) > 0 or config["configurable"].get("has_context")
+        if not has_source and not state.get("nudged") and _DIGIT_RE.search(content):
+            emit({"type": "self_correction", "content": "Answer wasn't based on the data -- querying the database instead."})
+            return {"messages": [{"role": "assistant", "content": content},
+                                 {"role": "user", "content": "Don't answer from memory. Use the tools to get these "
+                                  "numbers from the database, then call final_answer."}],
+                    "nudged": True, "rounds": rounds, "pending": []}
+        return {"final": content, "rounds": rounds, "pending": []}
+
+    if content:
+        emit({"type": "thought", "content": content})
+    assistant_msg = {"role": "assistant", "content": content or None, "tool_calls": [
+        {"id": c.id, "type": "function", "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"}}
+        for c in calls]}
+    return {"messages": [assistant_msg], "rounds": rounds, "pending": [
+        {"id": c.id, "name": c.function.name, "arguments": c.function.arguments or "{}"} for c in calls]}
+
+
+async def _call_mcp(session, name: str, args: dict):
+    res = await asyncio.wait_for(session.call_tool(name, args), timeout=TOOL_TIMEOUT_SECONDS)
+    text = res.content[0].text if res.content else "{}"
+    try:
+        output = json.loads(text)
+    except json.JSONDecodeError:
+        return {"error": text} if res.isError else {"text": text}
+    if res.isError and not (isinstance(output, dict) and "error" in output):
+        return {"error": text}
+    return output
+
+
+async def tools_node(state: AgentState, config) -> dict:
+    emit = get_stream_writer()
+    cfg = config["configurable"]
+    session, schemas = cfg["session"], cfg["schemas"]
+    tables = dict(state.get("tables") or {})
+    seen = dict(state.get("seen") or {})
+    data_calls = state.get("data_calls", 0)
+    pending = state.get("pending") or []
+    answer_too_early = any(c["name"] != "final_answer" for c in pending)
+    new_messages, final = [], None
+
+    for call in pending:
+        if _cancelled(config):
+            emit({"type": "error", "content": "Cancelled by user."})
+            return {"done": True}
+        name = call["name"]
+        try:
+            raw = json.loads(call["arguments"] or "{}")
+            raw = raw if isinstance(raw, dict) else {}
+        except json.JSONDecodeError:
+            raw = {}
+
+        if name == "final_answer":
+            if answer_too_early:
+                reply = {"error": "Ignored: call final_answer only after you've seen the tool results."}
+            else:
+                final = _clean_text(raw.get("answer") or raw.get("summary") or "")
+                reply = {}
+            new_messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(reply)})
+            continue
+
+        args = _clean_args(name, raw, schemas.get(name))
+        emit({"type": "tool_call", "tool": name, "input": args})
+        key = name + json.dumps(args, sort_keys=True, default=str)
+        table_ids: list[str] = []
+
+        if name == "plot_chart":
+            output = _build_chart(args, tables)
+            model_view = output if "error" in output else {"status": "chart shown to the user"}
+        elif name == "open_in_app":
+            ok = args.get("view") in APP_VIEWS
+            output = {"status": f"opened the {args.get('view')} view"} if ok else \
+                {"error": f"view must be one of: {', '.join(APP_VIEWS)}"}
+            model_view = output
+        elif key in seen:
+            output = seen[key]
+            model_view = {"note": "You already made this exact call; the result is unchanged. Use it.",
+                          "result": _for_model(name, output, [])}
+        elif name in schemas:
+            try:
+                output = await _call_mcp(session, name, args)
+            except asyncio.TimeoutError:
+                output = {"error": f"'{name}' timed out after {TOOL_TIMEOUT_SECONDS:.0f}s -- narrow the query."}
+            except Exception as e:  # noqa: BLE001
+                output = {"error": f"'{name}' failed: {e}"}
+            seen[key] = output
+            if name not in ("lookup_entity", "search_metrics"):
+                data_calls += 1
+            if not (isinstance(output, dict) and output.get("error")):
+                for t in _nested_tables(output):
+                    tid = f"T{len(tables) + 1}"
+                    tables[tid] = t
+                    table_ids.append(tid)
+            model_view = _for_model(name, output, table_ids)
+        else:
+            output = model_view = {"error": f"Unknown tool '{name}'."}
+
+        if isinstance(output, dict) and output.get("error"):
+            emit({"type": "self_correction", "content": f"{name}: {output['error']}"})
+        else:
+            emit({"type": "tool_result", "tool": name, "output": model_view})
+        for tid in table_ids:
+            emit({"type": "table", "table_id": tid, "table_data": tables[tid]})
+        if name == "plot_chart" and "error" not in output:
+            emit({"type": "chart", "chart_data": output})
+        if name == "open_in_app" and "error" not in output:
+            emit({"type": "ui_action", "action": "open", "view": args["view"], "state": args.get("state") or {}})
+        new_messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(model_view, default=str)})
+
+    update = {"messages": new_messages, "tables": tables, "seen": seen, "data_calls": data_calls, "pending": []}
+    if final:
+        update["final"] = final
+    return update
+
+
+async def wrap_up_node(state: AgentState, config) -> dict:
+    """Out of steps: answer from what we have rather than failing."""
+    emit = get_stream_writer()
+    messages = state["messages"] + [{"role": "user", "content": (
+        "Stop calling tools. Answer the question now using only the tool results above; say plainly if "
+        "they aren't enough.")}]
+    try:
+        response = await _complete(messages, None)
+        answer = _clean_text(response.choices[0].message.content)
+    except Exception as e:  # noqa: BLE001
+        emit({"type": "error", "content": f"LLM request failed: {e}"})
+        return {"done": True}
+    if not answer:
+        emit({"type": "error", "content": "The agent couldn't reach an answer within the step limit."})
+        return {"done": True}
+    return {"final": answer}
+
+
+def _after_agent(state: AgentState) -> str:
+    if state.get("done") or state.get("final") is not None:
+        return END
+    return "tools" if state.get("pending") else "agent"
+
+
+def _after_tools(state: AgentState) -> str:
+    if state.get("done") or state.get("final"):
+        return END
+    return "wrap_up" if state.get("rounds", 0) >= MAX_TOOL_ROUNDS else "agent"
+
+
+def build_graph():
+    g = StateGraph(AgentState)
+    g.add_node("agent", agent_node)
+    g.add_node("tools", tools_node)
+    g.add_node("wrap_up", wrap_up_node)
+    g.add_edge(START, "agent")
+    g.add_conditional_edges("agent", _after_agent, ["tools", "agent", END])
+    g.add_conditional_edges("tools", _after_tools, ["agent", "wrap_up", END])
+    g.add_edge("wrap_up", END)
+    return g.compile()
+
+
+GRAPH = build_graph()
+
+
+def _system_prompt(context: dict | None) -> str:
     cat = catalog.get_catalog()
     prompt = build_system_prompt(date_min=cat.date_min, date_max=cat.date_max, today=dt.date.today().isoformat())
+    prompt += _context_block(context)
     if not THINKING:
         prompt += "\n/no_think"
     return prompt
 
 
-async def run_agent(
-    question: str,
-    history: list[dict] | None = None,
-    request_id: str | None = None,
-) -> AsyncGenerator[dict, None]:
+async def run_agent(question: str, history: list[dict] | None = None, request_id: str | None = None,
+                    context: dict | None = None) -> AsyncGenerator[dict, None]:
+    from mcp_server.server import mcp  # late import: the server imports agent.stats
+
     try:
-        system = await asyncio.to_thread(_system_prompt)
+        system = await asyncio.to_thread(_system_prompt, context)
     except Exception as e:  # noqa: BLE001 - e.g. database missing
         yield {"type": "error", "content": f"Couldn't open the cricket database: {e}"}
         return
 
-    messages = [{"role": "system", "content": system}]
-    messages.extend(_sanitize_history(history))
-    messages.append({"role": "user", "content": question})
-
-    tables: dict[str, dict] = {}
-    seen_calls: dict[str, object] = {}
-    data_calls = 0
-    nudged = False
-
-    for _round in range(MAX_TOOL_ROUNDS):
-        if cancellation.is_cancelled(request_id):
-            yield {"type": "error", "content": "Cancelled by user."}
-            return
-
-        try:
-            response = await _complete(messages)
-        except Exception as e:  # noqa: BLE001
-            yield {"type": "error", "content": f"LLM request failed: {e}"}
-            return
-
-        message = response.choices[0].message
-        content = _clean_text(message.content)
-        tool_calls = message.tool_calls or []
-
-        if not tool_calls:
-            # Plain-text answer. If it quotes numbers without a single data
-            # lookup behind it, it's from the model's memory -- push back once.
-            if data_calls == 0 and not nudged and _DIGIT_RE.search(content):
-                nudged = True
-                messages.append({"role": "assistant", "content": content})
-                messages.append({"role": "user", "content": (
-                    "Don't answer from memory. Use the stats tools to get these numbers from the database, "
-                    "then call final_answer.")})
-                yield {"type": "self_correction", "content": "Answer wasn't based on the data -- querying the database instead."}
-                continue
-            yield {"type": "final_answer", "content": content, "chart_data": None, "table_data": None}
-            return
-
-        if content:
-            yield {"type": "thought", "content": content}
-
-        assistant_msg = {"role": "assistant", "content": content or None, "tool_calls": [
-            {"id": tc.id, "type": "function",
-             "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"}}
-            for tc in tool_calls
-        ]}
-        messages.append(assistant_msg)
-
-        final_args = None
-        other_calls = [tc for tc in tool_calls if tc.function.name != "final_answer"]
-
-        for tc in tool_calls:
-            if cancellation.is_cancelled(request_id):
-                yield {"type": "error", "content": "Cancelled by user."}
-                return
-
-            name = tc.function.name
-            try:
-                raw_args = json.loads(tc.function.arguments or "{}")
-                if not isinstance(raw_args, dict):
-                    raw_args = {}
-            except json.JSONDecodeError:
-                raw_args = {}
-
-            if name == "final_answer":
-                if other_calls:
-                    # Answer written before the results it depends on existed.
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(
-                        {"error": "Ignored: call final_answer only after you've seen the tool results."})})
-                else:
-                    final_args = raw_args
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": "{}"})
-                continue
-
-            args = _clean_args(name, raw_args)
-            yield {"type": "tool_call", "tool": name, "input": args}
-
-            call_key = name + json.dumps(args, sort_keys=True, default=str)
-            table_id = None
-            if call_key in seen_calls and name != "plot_chart":
-                output = seen_calls[call_key]
-                model_view = {"note": "You already made this exact call; the result is unchanged. "
-                                      "Use it (or change the arguments).",
-                              "result": output}
-            elif name == "plot_chart":
-                output = _build_chart(args, tables)
-                model_view = output if "error" in output else {"status": "chart shown to the user"}
-            elif name in TOOL_IMPLS:
-                impl = TOOL_IMPLS[name]
-                try:
-                    output = await asyncio.wait_for(asyncio.to_thread(lambda: impl(**args)),
-                                                    timeout=TOOL_TIMEOUT_SECONDS)
-                except asyncio.TimeoutError:
-                    output = {"error": f"'{name}' timed out after {TOOL_TIMEOUT_SECONDS:.0f}s -- narrow the query."}
-                except TypeError as e:
-                    output = {"error": f"Invalid arguments for '{name}': {e}"}
-                except Exception as e:  # noqa: BLE001 - surface to the model so it can retry
-                    output = {"error": f"'{name}' failed: {e}"}
-                seen_calls[call_key] = output
-                if name != "lookup":
-                    data_calls += 1
-                if _is_table(output) and "error" not in output and output["rows"]:
-                    table_id = f"T{len(tables) + 1}"
-                    if name == "run_sql":
-                        output = {"title": "Query result", **output}
-                    tables[table_id] = output
-                model_view = _for_model(output, table_id)
+    async with create_connected_server_and_client_session(mcp) as session:
+        listed = await session.list_tools()
+        openai_tools = mcp_tools_to_openai(listed.tools) + LOCAL_TOOLS + [FINAL_ANSWER]
+        schemas = {t["function"]["name"]: t["function"]["parameters"] for t in openai_tools}
+        state: AgentState = {
+            "messages": [{"role": "system", "content": system}, *_sanitize_history(history),
+                         {"role": "user", "content": question}],
+            "rounds": 0, "data_calls": 0, "nudged": False, "tables": {}, "seen": {}, "pending": [],
+            "final": None, "done": False,
+        }
+        config = {"configurable": {"session": session, "schemas": schemas, "openai_tools": openai_tools,
+                                   "request_id": request_id, "has_context": bool(context)},
+                  "recursion_limit": 4 * MAX_TOOL_ROUNDS + 10}
+        final = None
+        async for mode, chunk in GRAPH.astream(state, config, stream_mode=["custom", "values"]):
+            if mode == "custom":
+                yield chunk
             else:
-                output = {"error": f"Unknown tool '{name}'."}
-                model_view = output
-
-            if isinstance(output, dict) and output.get("error"):
-                yield {"type": "self_correction", "content": f"{name}: {output['error']}"}
-            else:
-                yield {"type": "tool_result", "tool": name, "output": model_view}
-            if table_id:
-                yield {"type": "table", "table_id": table_id, "table_data": tables[table_id]}
-            if name == "plot_chart" and "error" not in output:
-                yield {"type": "chart", "chart_data": output}
-
-            messages.append({"role": "tool", "tool_call_id": tc.id,
-                             "content": json.dumps(model_view, default=str)})
-
-        if final_args is not None:
-            answer = _clean_text(final_args.get("answer") or final_args.get("summary") or "")
-            if answer:
-                yield {"type": "final_answer", "content": answer, "chart_data": None, "table_data": None}
-                return
-
-    # Out of steps: answer with what we have rather than failing outright.
-    messages.append({"role": "user", "content": (
-        "Stop calling tools. Answer the question now using only the tool results above; "
-        "say plainly if they aren't enough.")})
-    try:
-        response = await _complete(messages, with_tools=False)
-        answer = _clean_text(response.choices[0].message.content)
-    except Exception as e:  # noqa: BLE001
-        yield {"type": "error", "content": f"LLM request failed: {e}"}
-        return
-    if answer:
-        yield {"type": "final_answer", "content": answer, "chart_data": None, "table_data": None}
-    else:
-        yield {"type": "error", "content": "The agent couldn't reach an answer within the step limit."}
+                final = chunk.get("final")
+        if final:
+            yield {"type": "final_answer", "content": final, "chart_data": None, "table_data": None}

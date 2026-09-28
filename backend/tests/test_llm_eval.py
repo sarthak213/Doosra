@@ -20,6 +20,7 @@ import pytest
 
 from agent import stats as stats_mod
 from agent import tools as tools_mod
+from analytics import db
 from agent.graph import run_agent
 
 pytestmark = [
@@ -42,12 +43,12 @@ def schema(monkeypatch):
     """Overrides conftest's autouse (schema-parametrized) synthetic-DB
     fixture: the eval runs against the real database the questions'
     expected answers assume."""
-    monkeypatch.setattr(tools_mod, "DB_PATH", REAL_DB)
+    monkeypatch.setattr(db, "DB_PATH", REAL_DB)
     yield "real"
 
 
 def _has_wickets_table():
-    con = tools_mod._get_connection()
+    con = db.connect()
     try:
         return bool(con.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'deliveries_wickets'"

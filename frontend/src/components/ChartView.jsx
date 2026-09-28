@@ -9,6 +9,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { humanize } from "./kit/theme.js";
 
 const GRID_COLOR = "rgba(241, 232, 214, 0.1)";
 const TEXT_COLOR = "#a79c87";
@@ -21,14 +22,6 @@ const TOOLTIP_STYLE = {
   fontFamily: "IBM Plex Mono",
   fontSize: 12,
 };
-
-export function humanize(key) {
-  if (!key) return "";
-  const special = { dot_pct: "Dot %", boundary_pct: "Boundary %", win_pct: "Win %", strike_rate: "Strike rate" };
-  if (special[key]) return special[key];
-  const s = String(key).replace(/_/g, " ");
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
 
 // Normalizes both shapes the backend can send: {x, series:[{name, values}]}
 // and the older single-series {x, y}.

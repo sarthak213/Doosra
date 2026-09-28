@@ -69,6 +69,29 @@ YEAR_SQL = "CAST(substr(m.date, 1, 4) AS INTEGER)"
 NOT_SUPER_OVER_SQL = "(m.match_type IN ('Test', 'MDM') OR d.innings_num <= 2)"
 
 
+def ball_exprs(new_schema: bool) -> dict:
+    """Per-delivery scoring rules as SQL over `deliveries d`:
+        faced       -- the batter faced it (a wide isn't faced; a no-ball is)
+        legal       -- counts toward the over (not a wide or no-ball)
+        bowler_runs -- runs charged to the bowler (byes, leg-byes, penalties aren't)
+    The current schema has per-type extra columns and is exact; the older
+    one kept a single extra type per ball, so a no-ball that also ran byes
+    charges the byes to the bowler there."""
+    if new_schema:
+        return {
+            "faced": "(d.extra_wides IS NULL)",
+            "legal": "(d.extra_wides IS NULL AND d.extra_noballs IS NULL)",
+            # extra_* columns come out of the pandas ingest as DOUBLE; keep runs integral.
+            "bowler_runs": "CAST(d.runs_total - COALESCE(d.extra_byes, 0) - COALESCE(d.extra_legbyes, 0) "
+                           "- COALESCE(d.extra_penalty, 0) AS BIGINT)",
+        }
+    return {
+        "faced": "(d.extra_type IS NULL OR d.extra_type <> 'wides')",
+        "legal": "(d.extra_type IS NULL OR d.extra_type NOT IN ('wides', 'noballs'))",
+        "bowler_runs": "(d.runs_total - CASE WHEN d.extra_type IN ('byes', 'legbyes', 'penalty') THEN d.runs_extras ELSE 0 END)",
+    }
+
+
 @dataclass
 class Scope:
     events: list[str] | None = None
@@ -205,6 +228,9 @@ def build_scope(
         s.match_types = fmt.match_types
         s.team_type = fmt.team_type
         s.applied["format"] = fmt.display
+        if fmt.display == "T20I":
+            s.notes.append("T20Is include associate nations (every T20 between ICC members has been a T20I since "
+                           "2019); filter by team or competition to focus on the leading sides.")
 
     if team:
         t = catalog.resolve_team(team, gender=s.gender)
@@ -255,6 +281,34 @@ def build_scope(
 
 FILTER_ARGS = ("competition", "format", "gender", "team", "opposition", "venue", "season",
                "from_year", "to_year", "phase", "innings")
+
+
+# Names models and people reach for, mapped onto ours.
+FILTER_ALIASES = {
+    "tournament": "competition", "event": "competition", "event_name": "competition", "league": "competition",
+    "series": "competition", "match_type": "format", "year": "season", "ground": "venue", "stadium": "venue",
+    "against": "opposition", "vs": "opposition", "opponent": "opposition", "since": "from_year",
+    "start_year": "from_year", "end_year": "to_year", "until": "to_year",
+}
+
+
+def normalize_filters(filters: dict | None) -> dict:
+    """Clean a filters object from a client: map alias keys, drop empty
+    values and "all" (which means no filter -- except gender, where 'all'
+    turns off the men's-cricket default). Unknown keys are an error."""
+    out = {}
+    for k, v in (filters or {}).items():
+        key = FILTER_ALIASES.get(k, k)
+        if key not in FILTER_ARGS:
+            raise ResolutionError("filter", k, f"Unknown filter '{k}'. Valid filters: {', '.join(FILTER_ARGS)}.")
+        if v is None or v == "" or (isinstance(v, str) and v.strip().lower() in ("null", "none")):
+            continue
+        if isinstance(v, str) and v.strip().lower() in ("all", "both", "any", "overall", "n/a"):
+            if key == "gender":
+                out[key] = "all"
+            continue
+        out.setdefault(key, v)
+    return out
 
 
 def pop_filters(kwargs: dict) -> dict:

@@ -5,9 +5,9 @@ competitions split across naming eras, renamed franchises."""
 
 import pytest
 
-from agent import catalog
-from agent.catalog import ResolutionError, _given_compat, _unitize
-from agent.scope import build_scope
+from analytics import catalog
+from analytics.catalog import ResolutionError, _given_compat, _unitize
+from analytics.scope import build_scope
 
 
 def units(name_tokens, initials):
@@ -109,5 +109,5 @@ class TestScope:
             build_scope(season="last year")
 
     def test_literals_are_escaped(self):
-        from agent.scope import lit
+        from analytics.scope import lit
         assert lit("Lord's") == "'Lord''s'"

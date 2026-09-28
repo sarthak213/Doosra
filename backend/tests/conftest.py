@@ -24,7 +24,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent import tools  # noqa: E402
+from analytics import build as analytics_build  # noqa: E402
+from analytics import db  # noqa: E402
 from ingest import build_db  # noqa: E402
 
 
@@ -276,6 +277,7 @@ def fixture_db_path(tmp_path_factory):
         build_db.main()
     finally:
         sys.argv = argv
+    analytics_build.build(db_path, progress=lambda *_: None)
     return db_path
 
 
@@ -308,6 +310,7 @@ def old_schema_db_path(fixture_db_path, tmp_path_factory):
         con.execute("DETACH src")
     finally:
         con.close()
+    analytics_build.build(db_path, progress=lambda *_: None)
     return db_path
 
 
@@ -318,5 +321,5 @@ def schema(request, monkeypatch, fixture_db_path, old_schema_db_path):
     so the two can't leak into each other. Yields "new" or "old" so a test
     can assert the (documented) differences between them."""
     path = fixture_db_path if request.param == "new" else old_schema_db_path
-    monkeypatch.setattr(tools, "DB_PATH", path)
+    monkeypatch.setattr(db, "DB_PATH", path)
     yield request.param

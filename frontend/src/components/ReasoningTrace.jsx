@@ -99,6 +99,17 @@ function Step({ step }) {
     );
   }
 
+  if (step.type === "ui_action") {
+    return (
+      <div className="step step-tool">
+        <span className="step-dot step-dot-brass" />
+        <p>
+          opened the <code>{step.view}</code> view
+        </p>
+      </div>
+    );
+  }
+
   if (step.type === "self_correction") {
     return (
       <div className="step step-correction">

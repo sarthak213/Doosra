@@ -2,7 +2,7 @@
 the schema/stats endpoints. run_sql's guard is a security boundary -- the
 external-access and forbidden-keyword tests here must not regress."""
 
-from agent import graph, tools
+from agent import tools
 
 
 class TestRunSqlGuard:
@@ -69,13 +69,32 @@ class TestSchemaAndStats:
         assert s["tournaments"] == 1  # only "Test Bash League" has an event_name
 
 
-class TestToolRegistration:
-    def test_every_schema_has_an_impl(self):
-        # Catches the classic regression: adding a tool schema to the LLM
-        # prompt but forgetting to register its implementation (or the
-        # reverse -- an impl with no schema the model can never call).
-        schema_names = {t["function"]["name"] for t in graph.TOOL_SCHEMAS}
-        assert schema_names == set(graph.TOOL_IMPLS)
+class TestMcpServer:
+    def test_tools_listed(self):
+        import asyncio
 
-    def test_final_answer_is_offered(self):
-        assert "final_answer" in {t["function"]["name"] for t in graph.ALL_TOOLS}
+        from mcp.shared.memory import create_connected_server_and_client_session
+        from mcp_server.server import mcp
+
+        async def names():
+            async with create_connected_server_and_client_session(mcp) as session:
+                return {t.name for t in (await session.list_tools()).tools}
+
+        got = asyncio.run(names())
+        assert {"player_profile", "player_stats", "compare_players", "leaderboard", "player_form", "career_arc",
+                "percentiles", "player_matrix", "similar_players", "team_record", "matchup", "run_sql"} <= got
+
+    def test_tool_call_resolves_names(self):
+        import asyncio
+        import json
+
+        from mcp.shared.memory import create_connected_server_and_client_session
+        from mcp_server.server import mcp
+
+        async def call():
+            async with create_connected_server_and_client_session(mcp) as session:
+                res = await session.call_tool("player_stats", {"player": "Kohli", "metrics": ["runs"]})
+                return json.loads(res.content[0].text)
+
+        out = asyncio.run(call())
+        assert out["rows"] == [["V Kohli", 1]]
