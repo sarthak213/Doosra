@@ -3,6 +3,7 @@ uvicorn[standard]>=0.30.6
 duckdb>=1.1.1
 pandas>=2.2.2
 tqdm>=4.66.5
+zstandard>=0.23; python_version < "3.14"  # ingest.pull (3.14+ has compression.zstd)
 openai>=1.51.0
 python-dotenv>=1.0.1
 mcp>=1.9,<2  # 2.x changed the in-memory client-session API used by agent/graph.py

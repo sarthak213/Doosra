@@ -1,5 +1,5 @@
 {
-  "description": "Evaluation questions for the cricket agent. Questions with a 'check' block are verified deterministically against the real database by tests/test_eval_stats.py (no LLM involved); their expected values were computed with direct SQL, independent of the stats code under test. Questions without a 'check' are exercised only by the LLM-in-the-loop eval (tests/test_llm_eval.py, run explicitly: pytest -m llm). Values were recomputed (super overs excluded; 'retired hurt'/'retired not out' are not dismissals) and captured against data/cricket.duckdb as ingested at the time the file was created -- re-ingesting with newer raw data will shift them, and that is exactly the signal the eval is meant to give.",
+  "description": "Evaluation questions for the cricket agent. Questions with a 'check' block are verified deterministically against the real database by tests/test_eval_stats.py (no LLM involved); their expected values were computed with direct SQL, independent of the stats code under test. Questions without a 'check' are exercised only by the LLM-in-the-loop eval (tests/test_llm_eval.py, run explicitly: pytest -m llm). Values were recomputed (super overs excluded; 'retired hurt'/'retired not out' are not dismissals) and captured against data/cricket.duckdb as ingested at the time the file was created -- re-ingesting with newer raw data will shift them, and that is exactly the signal the eval is meant to give. Schema 3 (Sep 2026): boundaries exclude runs flagged non_boundary (3 of Kohli's 4s and 3 of his 6s were run), and a ball with several extras is judged on all of them (one Malinga 'penalty+wides' ball is not legal).",
   "questions": [
     {
       "id": "q01",
@@ -117,7 +117,7 @@
     {
       "id": "q08",
       "question": "How many sixes has Virat Kohli hit in men's cricket?",
-      "expected_answer": "635 sixes.",
+      "expected_answer": "632 sixes.",
       "check": {
         "tool": "player_stats",
         "args": {
@@ -126,13 +126,13 @@
           "gender": "male"
         },
         "field": "sixes",
-        "equals": 635
+        "equals": 632
       }
     },
     {
       "id": "q09",
       "question": "How many fours has Virat Kohli hit in men's cricket?",
-      "expected_answer": "3,600 fours.",
+      "expected_answer": "3,597 fours.",
       "check": {
         "tool": "player_stats",
         "args": {
@@ -141,7 +141,7 @@
           "gender": "male"
         },
         "field": "fours",
-        "equals": 3600
+        "equals": 3597
       }
     },
     {
@@ -177,7 +177,7 @@
     {
       "id": "q12",
       "question": "How many legal deliveries did Lasith Malinga bowl in men's cricket?",
-      "expected_answer": "19,283 balls.",
+      "expected_answer": "19,282 balls.",
       "check": {
         "tool": "player_stats",
         "args": {
@@ -186,7 +186,7 @@
           "gender": "male"
         },
         "field": "balls",
-        "equals": 19283
+        "equals": 19282
       }
     },
     {

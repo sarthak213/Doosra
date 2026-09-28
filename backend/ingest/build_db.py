@@ -1,86 +1,45 @@
 """
-Parses raw Cricsheet JSON match files into a normalized DuckDB database with
-four tables: matches, deliveries, deliveries_wickets, players_matches.
+Builds the cricket database from Cricsheet data.
 
-Schema
+    python ingest/build_db.py --zip data/raw/all_json.zip --register-dir data/raw --out data/cricket.duckdb
+    python ingest/build_db.py --raw-dir path/to/json/folder --out data/cricket.duckdb
+    python ingest/build_db.py --zip recently_added_7_json.zip --incremental --out data/cricket.duckdb
+
+Match JSON is read straight from the Cricsheet zip (streamed, never
+extracted) or from a folder of files. Matches are parsed and written in
+batches so the whole archive never sits in memory. --incremental upserts the
+given matches into an existing database instead of rebuilding.
+
+After building, run `python -m analytics.build` for the derived tables.
+
+Tables
 ------
-matches(
-    match_id TEXT PRIMARY KEY,
-    match_type TEXT,        -- Test, ODI, T20, IT20, MDM, etc. (the FORMAT, not the tournament)
-    event_name TEXT,        -- the TOURNAMENT/competition, e.g. "Indian Premier League",
-                             -- "Big Bash League", "ICC Men's T20 World Cup" (null for bilateral series)
-    match_number TEXT,      -- e.g. "Final", "Qualifier 1", or a numeric match number within the event
-    gender TEXT,             -- male / female
-    team_type TEXT,          -- international / club
-    overs_per_innings INTEGER,  -- null for Test matches
-    date TEXT,               -- first date of match
-    venue TEXT,
-    city TEXT,
-    season TEXT,
-    team1 TEXT,
-    team2 TEXT,
-    toss_winner TEXT,
-    toss_decision TEXT,
-    winner TEXT,
-    win_by_runs INTEGER,
-    win_by_wickets INTEGER,
-    player_of_match TEXT
-)
+matches            one row per match. The FORMAT is match_type (Test, ODI, T20,
+                   IT20, ODM, MDM); the COMPETITION is event_name. winner is NULL
+                   for ties/draws/no results -- `result` says which, and
+                   `eliminator` names the super-over/bowl-out winner of a tie.
+deliveries         one row per ball. extra_* hold each extra type's runs (a ball
+                   can carry several); wicket_kind/player_dismissed describe the
+                   FIRST wicket only -- see deliveries_wickets. is_super_over marks
+                   super-over innings; non_boundary marks a "4" that was run.
+deliveries_wickets one row per wicket (a ball can have two), with fielders.
+players_matches    the playing XI of each match, with Cricsheet person ids.
+people             the Cricsheet register (one row per person, ids for other sites).
+people_names       every name the register knows a person by.
+build_info         when and from what the database was built.
 
-deliveries(
-    match_id TEXT,
-    innings_num INTEGER,       -- 1, 2, (3/4 for tests)
-    batting_team TEXT,
-    over_num INTEGER,          -- 0-indexed, matches Cricsheet convention
-    ball_in_over INTEGER,      -- 1-indexed within the over (legal + illegal deliveries counted in source order)
-    batter TEXT,
-    bowler TEXT,
-    non_striker TEXT,
-    runs_batter INTEGER,
-    runs_extras INTEGER,
-    runs_total INTEGER,
-    extra_type TEXT,           -- "+"-joined extra type keys present on this ball, e.g.
-                                -- "noballs+byes" if more than one applies (nullable)
-    extra_wides INTEGER,       -- per-type extra amounts, nullable when that type doesn't apply
-    extra_noballs INTEGER,     -- (a ball can legitimately have more than one extra type at once,
-    extra_byes INTEGER,        -- e.g. a no-ball that also runs byes -- these columns, unlike the
-    extra_legbyes INTEGER,     -- single extra_type string above, don't lose that information)
-    extra_penalty INTEGER,
-    is_wicket BOOLEAN,
-    wicket_kind TEXT,          -- kind of the FIRST wicket on this ball, kept for backward
-                                -- compatibility with simple queries (caught, bowled, lbw, run out,
-                                -- etc.; nullable) -- see deliveries_wickets for ALL wickets on a ball
-    player_dismissed TEXT      -- player dismissed by the FIRST wicket on this ball (nullable)
-)
-
-deliveries_wickets(
-    match_id TEXT,
-    innings_num INTEGER,
-    over_num INTEGER,
-    ball_in_over INTEGER,
-    wicket_seq INTEGER,       -- 1-indexed order of this wicket among (rare) multiple wickets on one ball
-    kind TEXT,                -- caught, bowled, lbw, run out, etc.
-    player_out TEXT,
-    fielders TEXT             -- JSON-encoded list of fielder names involved, e.g. '["A de Villiers"]'
-)
-
-players_matches(
-    match_id TEXT,
-    team TEXT,
-    player TEXT
-)
-
-Usage:
-    python build_db.py --raw-dir ../data/raw --out ../data/cricket.duckdb
-
-NOTE: this schema (extra_wides/noballs/byes/legbyes/penalty columns and the
-new deliveries_wickets table) changed from the single-extra-type /
-first-wicket-only version. Any existing cricket.duckdb built with the old
-schema must be rebuilt by re-running this script against the raw JSON.
+Data: Cricsheet (https://cricsheet.org), Open Data Commons Attribution
+License 1.0. Public use must credit Cricsheet.
 """
 
+from __future__ import annotations
+
 import argparse
+import datetime as dt
+import hashlib
 import json
+import sys
+import zipfile
 from pathlib import Path
 
 import duckdb
@@ -88,17 +47,57 @@ import pandas as pd
 from tqdm import tqdm
 
 # Matches are parsed and flushed to disk in batches so the whole Cricsheet
-# archive (tens of thousands of matches) doesn't have to sit in memory as
-# Python lists/DataFrames at once.
+# archive (tens of thousands of matches) doesn't have to sit in memory.
 BATCH_SIZE = 500
+SCHEMA_VERSION = 3
+
+SCHEMA = {
+    "matches": """
+        match_id VARCHAR, match_type VARCHAR, event_name VARCHAR, match_number VARCHAR,
+        gender VARCHAR, team_type VARCHAR, overs_per_innings INTEGER, balls_per_over INTEGER,
+        date VARCHAR, venue VARCHAR, city VARCHAR, season VARCHAR, team1 VARCHAR, team2 VARCHAR,
+        toss_winner VARCHAR, toss_decision VARCHAR, winner VARCHAR, win_by_runs INTEGER,
+        win_by_wickets INTEGER, result VARCHAR, eliminator VARCHAR, method VARCHAR,
+        target_runs INTEGER, target_overs DOUBLE, player_of_match VARCHAR,
+        data_version VARCHAR, revision INTEGER""",
+    "deliveries": """
+        match_id VARCHAR, innings_num INTEGER, batting_team VARCHAR, is_super_over BOOLEAN,
+        over_num INTEGER, ball_in_over INTEGER, batter VARCHAR, bowler VARCHAR, non_striker VARCHAR,
+        runs_batter INTEGER, runs_extras INTEGER, runs_total INTEGER, non_boundary BOOLEAN,
+        extra_type VARCHAR, extra_wides INTEGER, extra_noballs INTEGER, extra_byes INTEGER,
+        extra_legbyes INTEGER, extra_penalty INTEGER,
+        is_wicket BOOLEAN, wicket_kind VARCHAR, player_dismissed VARCHAR""",
+    "deliveries_wickets": """
+        match_id VARCHAR, innings_num INTEGER, over_num INTEGER, ball_in_over INTEGER,
+        wicket_seq INTEGER, kind VARCHAR, player_out VARCHAR, fielders VARCHAR, fielder_ids VARCHAR""",
+    "players_matches": """
+        match_id VARCHAR, team VARCHAR, player VARCHAR, player_id VARCHAR""",
+}
+MATCH_TABLES = tuple(SCHEMA)
+
+
+def _int(v):
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_match(match_id: str, data: dict):
     info = data.get("info", {})
+    meta = data.get("meta", {}) or {}
     dates = info.get("dates", [])
-    outcome = info.get("outcome", {})
+    outcome = info.get("outcome", {}) or {}
     teams = info.get("teams", [])
     event = info.get("event", {}) or {}
+    registry = (info.get("registry") or {}).get("people") or {}
+    innings_list = data.get("innings", []) or []
+
+    target = {}
+    for inn in innings_list:
+        if inn.get("target"):
+            target = inn["target"]
+            break
 
     match_row = {
         "match_id": match_id,
@@ -107,44 +106,44 @@ def parse_match(match_id: str, data: dict):
         "match_number": str(event.get("match_number")) if event.get("match_number") is not None else event.get("stage"),
         "gender": info.get("gender"),
         "team_type": info.get("team_type"),
-        "overs_per_innings": info.get("overs"),
+        "overs_per_innings": _int(info.get("overs")),
+        "balls_per_over": _int(info.get("balls_per_over")),
         "date": dates[0] if dates else None,
         "venue": info.get("venue"),
         "city": info.get("city"),
         "season": str(info.get("season")) if info.get("season") is not None else None,
         "team1": teams[0] if len(teams) > 0 else None,
         "team2": teams[1] if len(teams) > 1 else None,
-        "toss_winner": info.get("toss", {}).get("winner"),
-        "toss_decision": info.get("toss", {}).get("decision"),
+        "toss_winner": (info.get("toss") or {}).get("winner"),
+        "toss_decision": (info.get("toss") or {}).get("decision"),
         "winner": outcome.get("winner"),
-        "win_by_runs": (outcome.get("by") or {}).get("runs"),
-        "win_by_wickets": (outcome.get("by") or {}).get("wickets"),
+        "win_by_runs": _int((outcome.get("by") or {}).get("runs")),
+        "win_by_wickets": _int((outcome.get("by") or {}).get("wickets")),
+        "result": outcome.get("result"),
+        "eliminator": outcome.get("eliminator") or outcome.get("bowl_out"),
+        "method": outcome.get("method"),
+        "target_runs": _int(target.get("runs")),
+        "target_overs": target.get("overs"),
         "player_of_match": (info.get("player_of_match") or [None])[0],
+        "data_version": meta.get("data_version"),
+        "revision": _int(meta.get("revision")),
     }
 
-    delivery_rows = []
-    wicket_rows = []
-    for innings_num, innings in enumerate(data.get("innings", []), start=1):
+    delivery_rows, wicket_rows = [], []
+    for innings_num, innings in enumerate(innings_list, start=1):
         batting_team = innings.get("team")
+        super_over = bool(innings.get("super_over", False))
         for over in innings.get("overs", []):
             over_num = over.get("over")
             for ball_idx, delivery in enumerate(over.get("deliveries", []), start=1):
                 runs = delivery.get("runs", {})
                 extras = delivery.get("extras", {}) or {}
-                # Keep the joined-keys string for backward compatibility, but
-                # also capture every extra type's amount separately so a
-                # ball with e.g. both "noballs" and "byes" doesn't silently
-                # lose one of them.
-                extra_type = "+".join(sorted(extras.keys())) if extras else None
                 wickets = delivery.get("wickets") or []
-                is_wicket = len(wickets) > 0
-                wicket_kind = wickets[0].get("kind") if is_wicket else None
-                player_dismissed = wickets[0].get("player_out") if is_wicket else None
-
                 delivery_rows.append({
                     "match_id": match_id,
                     "innings_num": innings_num,
                     "batting_team": batting_team,
+                    "is_super_over": super_over,
                     "over_num": over_num,
                     "ball_in_over": ball_idx,
                     "batter": delivery.get("batter"),
@@ -153,19 +152,20 @@ def parse_match(match_id: str, data: dict):
                     "runs_batter": runs.get("batter", 0),
                     "runs_extras": runs.get("extras", 0),
                     "runs_total": runs.get("total", 0),
-                    "extra_type": extra_type,
+                    "non_boundary": bool(runs.get("non_boundary", False)),
+                    # Joined keys kept for simple queries; the per-type columns are exact.
+                    "extra_type": "+".join(sorted(extras.keys())) if extras else None,
                     "extra_wides": extras.get("wides"),
                     "extra_noballs": extras.get("noballs"),
                     "extra_byes": extras.get("byes"),
                     "extra_legbyes": extras.get("legbyes"),
                     "extra_penalty": extras.get("penalty"),
-                    "is_wicket": is_wicket,
-                    "wicket_kind": wicket_kind,
-                    "player_dismissed": player_dismissed,
+                    "is_wicket": bool(wickets),
+                    "wicket_kind": wickets[0].get("kind") if wickets else None,
+                    "player_dismissed": wickets[0].get("player_out") if wickets else None,
                 })
-
                 for seq, w in enumerate(wickets, start=1):
-                    fielders = [f.get("name") for f in (w.get("fielders") or []) if f.get("name")]
+                    names = [f.get("name") for f in (w.get("fielders") or []) if f.get("name")]
                     wicket_rows.append({
                         "match_id": match_id,
                         "innings_num": innings_num,
@@ -174,116 +174,164 @@ def parse_match(match_id: str, data: dict):
                         "wicket_seq": seq,
                         "kind": w.get("kind"),
                         "player_out": w.get("player_out"),
-                        "fielders": json.dumps(fielders),
+                        "fielders": json.dumps(names),
+                        "fielder_ids": json.dumps([registry.get(n) for n in names]),
                     })
 
-    player_rows = []
-    for team, players in (info.get("players") or {}).items():
-        for player in players:
-            player_rows.append({"match_id": match_id, "team": team, "player": player})
-
+    player_rows = [
+        {"match_id": match_id, "team": team, "player": p, "player_id": registry.get(p)}
+        for team, players in (info.get("players") or {}).items()
+        for p in players
+    ]
     return match_row, delivery_rows, wicket_rows, player_rows
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--raw-dir", default="../data/raw")
-    parser.add_argument("--out", default="../data/cricket.duckdb")
-    args = parser.parse_args()
+def iter_match_files(source: Path):
+    """Yield (match_id, parsed json) from a Cricsheet zip or a folder of .json files."""
+    if source.suffix.lower() == ".zip":
+        with zipfile.ZipFile(source) as zf:
+            names = sorted(n for n in zf.namelist() if n.lower().endswith(".json"))
+            for name in tqdm(names, desc=f"Parsing {source.name}"):
+                try:
+                    with zf.open(name) as fh:
+                        yield Path(name).stem, json.load(fh)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+    else:
+        for path in tqdm(sorted(source.rglob("*.json")), desc=f"Parsing {source}"):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    yield path.stem, json.load(fh)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
 
-    raw_dir = Path(args.raw_dir)
-    json_files = sorted(raw_dir.rglob("*.json"))
-    print(f"Found {len(json_files)} match files under {raw_dir}")
 
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(out_path))
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    con.execute("DROP TABLE IF EXISTS matches")
-    con.execute("DROP TABLE IF EXISTS deliveries")
-    con.execute("DROP TABLE IF EXISTS deliveries_wickets")
-    con.execute("DROP TABLE IF EXISTS players_matches")
 
-    total_matches = total_deliveries = total_wickets = total_players = 0
-    matches_buf, deliveries_buf, wickets_buf, players_buf = [], [], [], []
-    first_batch = True
+def load_register(con, register_dir: Path) -> dict:
+    """people.csv and names.csv from https://cricsheet.org/register/ -> tables."""
+    people, names = register_dir / "people.csv", register_dir / "names.csv"
+    counts = {}
+    if people.exists():
+        con.execute(f"CREATE OR REPLACE TABLE people AS SELECT * FROM read_csv('{people.as_posix()}', header=true, all_varchar=true)")
+        counts["people"] = con.execute("SELECT COUNT(*) FROM people").fetchone()[0]
+    if names.exists():
+        con.execute(f"""CREATE OR REPLACE TABLE people_names AS
+                        SELECT identifier, name FROM read_csv('{names.as_posix()}', header=true, all_varchar=true)""")
+        # Every person is also known by their register name.
+        if people.exists():
+            con.execute("""INSERT INTO people_names SELECT identifier, name FROM people
+                           WHERE (identifier, name) NOT IN (SELECT identifier, name FROM people_names)""")
+        counts["people_names"] = con.execute("SELECT COUNT(*) FROM people_names").fetchone()[0]
+    return counts
 
-    def flush():
-        # Rows are parsed in batches (BATCH_SIZE matches at a time) and
-        # written to disk immediately, rather than accumulating the entire
-        # Cricsheet archive as Python lists/DataFrames in memory at once.
-        nonlocal first_batch, total_matches, total_deliveries, total_wickets, total_players
-        matches_df = pd.DataFrame(matches_buf)
-        deliveries_df = pd.DataFrame(deliveries_buf)
-        wickets_df = pd.DataFrame(wickets_buf)
-        players_df = pd.DataFrame(players_buf)
 
-        con.register("matches_df", matches_df)
-        con.register("deliveries_df", deliveries_df)
-        con.register("wickets_df", wickets_df)
-        con.register("players_df", players_df)
-        try:
-            if first_batch:
-                con.execute("CREATE TABLE matches AS SELECT * FROM matches_df")
-                con.execute("CREATE TABLE deliveries AS SELECT * FROM deliveries_df")
-                con.execute("CREATE TABLE deliveries_wickets AS SELECT * FROM wickets_df")
-                con.execute("CREATE TABLE players_matches AS SELECT * FROM players_df")
-                first_batch = False
-            else:
-                con.execute("INSERT INTO matches SELECT * FROM matches_df")
-                con.execute("INSERT INTO deliveries SELECT * FROM deliveries_df")
-                con.execute("INSERT INTO deliveries_wickets SELECT * FROM wickets_df")
-                con.execute("INSERT INTO players_matches SELECT * FROM players_df")
-        finally:
-            con.unregister("matches_df")
-            con.unregister("deliveries_df")
-            con.unregister("wickets_df")
-            con.unregister("players_df")
+def build(sources: list[Path], out: Path, register_dir: Path | None = None, incremental: bool = False,
+          progress=print) -> dict:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(out))
+    try:
+        if not incremental:
+            for t in (*MATCH_TABLES, "people", "people_names", "build_info"):
+                con.execute(f"DROP TABLE IF EXISTS {t}")
+        for t, cols in SCHEMA.items():
+            con.execute(f"CREATE TABLE IF NOT EXISTS {t} ({cols})")
 
-        total_matches += len(matches_df)
-        total_deliveries += len(deliveries_df)
-        total_wickets += len(wickets_df)
-        total_players += len(players_df)
-        matches_buf.clear()
-        deliveries_buf.clear()
-        wickets_buf.clear()
-        players_buf.clear()
+        buffers = {t: [] for t in MATCH_TABLES}
+        batch_ids: list[str] = []
+        totals = {t: 0 for t in MATCH_TABLES}
 
-    for path in tqdm(json_files, desc="Parsing"):
-        match_id = path.stem
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            continue
+        def flush():
+            if not batch_ids:
+                return
+            if incremental:
+                ids = pd.DataFrame({"match_id": batch_ids})
+                con.register("ids_df", ids)
+                for t in MATCH_TABLES:
+                    con.execute(f"DELETE FROM {t} WHERE match_id IN (SELECT match_id FROM ids_df)")
+                con.unregister("ids_df")
+            for t in MATCH_TABLES:
+                if not buffers[t]:
+                    continue
+                df = pd.DataFrame(buffers[t])
+                cols = [c.split()[0] for c in SCHEMA[t].replace("\n", " ").split(",")]
+                con.register("batch_df", df)
+                try:
+                    con.execute(f"INSERT INTO {t} ({', '.join(cols)}) SELECT {', '.join(cols)} FROM batch_df")
+                finally:
+                    con.unregister("batch_df")
+                totals[t] += len(df)
+                buffers[t].clear()
+            batch_ids.clear()
 
-        match_row, delivery_rows, wicket_rows, player_rows = parse_match(match_id, data)
-        matches_buf.append(match_row)
-        deliveries_buf.extend(delivery_rows)
-        wickets_buf.extend(wicket_rows)
-        players_buf.extend(player_rows)
-
-        if len(matches_buf) >= BATCH_SIZE:
-            flush()
-
-    if matches_buf:
+        for source in sources:
+            for match_id, data in iter_match_files(source):
+                m, d, w, p = parse_match(match_id, data)
+                buffers["matches"].append(m)
+                buffers["deliveries"].extend(d)
+                buffers["deliveries_wickets"].extend(w)
+                buffers["players_matches"].extend(p)
+                batch_ids.append(match_id)
+                if len(batch_ids) >= BATCH_SIZE:
+                    flush()
         flush()
 
-    # Helpful indexes for the agent's typical query patterns
-    con.execute("CREATE INDEX idx_deliveries_match ON deliveries(match_id)")
-    con.execute("CREATE INDEX idx_deliveries_batter ON deliveries(batter)")
-    con.execute("CREATE INDEX idx_deliveries_bowler ON deliveries(bowler)")
-    con.execute("CREATE INDEX idx_wickets_match ON deliveries_wickets(match_id)")
-    con.execute("CREATE INDEX idx_matches_type ON matches(match_type)")
-    con.execute("CREATE INDEX idx_matches_event ON matches(event_name)")
+        register_counts = load_register(con, register_dir) if register_dir else {}
 
-    print(f"matches: {total_matches} rows")
-    print(f"deliveries: {total_deliveries} rows")
-    print(f"deliveries_wickets: {total_wickets} rows")
-    print(f"players_matches: {total_players} rows")
-    print(f"Wrote database to {out_path}")
+        for sql in (
+            "CREATE INDEX IF NOT EXISTS idx_deliveries_match ON deliveries(match_id)",
+            "CREATE INDEX IF NOT EXISTS idx_deliveries_batter ON deliveries(batter)",
+            "CREATE INDEX IF NOT EXISTS idx_deliveries_bowler ON deliveries(bowler)",
+            "CREATE INDEX IF NOT EXISTS idx_wickets_match ON deliveries_wickets(match_id)",
+            "CREATE INDEX IF NOT EXISTS idx_matches_type ON matches(match_type)",
+            "CREATE INDEX IF NOT EXISTS idx_matches_event ON matches(event_name)",
+            "CREATE INDEX IF NOT EXISTS idx_players_matches_player ON players_matches(player)",
+        ):
+            con.execute(sql)
 
-    con.close()
+        info = {
+            "schema_version": SCHEMA_VERSION,
+            "built_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "incremental": incremental,
+            "sources": {s.name: sha256(s) for s in sources if s.is_file()},
+            "rows": {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in MATCH_TABLES},
+            "register": register_counts,
+            "latest_match_date": con.execute("SELECT MAX(date) FROM matches").fetchone()[0],
+        }
+        con.execute("CREATE OR REPLACE TABLE build_info (key VARCHAR, value VARCHAR)")
+        con.executemany("INSERT INTO build_info VALUES (?, ?)", [[k, json.dumps(v)] for k, v in info.items()])
+    finally:
+        con.close()
+
+    progress(f"Parsed this run: " + ", ".join(f"{t}={n:,}" for t, n in totals.items()))
+    progress(f"Database now: " + ", ".join(f"{t}={n:,}" for t, n in info["rows"].items())
+             + (f"; register: {register_counts}" if register_counts else ""))
+    progress(f"Wrote {out}")
+    return info
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Build the cricket database from Cricsheet data.")
+    parser.add_argument("--zip", action="append", default=[], help="Cricsheet JSON zip (repeatable)")
+    parser.add_argument("--raw-dir", help="folder of Cricsheet .json files (searched recursively)")
+    parser.add_argument("--register-dir", help="folder containing people.csv and names.csv")
+    parser.add_argument("--incremental", action="store_true", help="upsert into an existing database")
+    parser.add_argument("--out", default="data/cricket.duckdb")
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+
+    sources = [Path(z) for z in args.zip] + ([Path(args.raw_dir)] if args.raw_dir else [])
+    if not sources:
+        parser.error("give --zip and/or --raw-dir")
+    for s in sources:
+        if not s.exists():
+            parser.error(f"not found: {s}")
+    build(sources, Path(args.out), Path(args.register_dir) if args.register_dir else None, args.incremental)
 
 
 if __name__ == "__main__":

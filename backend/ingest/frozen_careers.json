@@ -1,0 +1,426 @@
+{
+  "frozen_at": "2026-09-28",
+  "latest_match": "2026-09-17",
+  "players": {
+    "SR Tendulkar": {
+      "player_id": "d2c2b2d5",
+      "last_match": "2013-11-14",
+      "career": {
+        "MULTI": {
+          "bat_runs": 6416,
+          "bat_balls": 11867,
+          "bat_outs": 123,
+          "bowl_balls": 1306,
+          "bowl_runs": 845,
+          "bowl_wkts": 11
+        },
+        "ODI": {
+          "bat_runs": 6433,
+          "bat_balls": 7414,
+          "bat_outs": 134,
+          "bowl_balls": 1491,
+          "bowl_runs": 1383,
+          "bowl_wkts": 27
+        },
+        "T20": {
+          "bat_runs": 2344,
+          "bat_balls": 1960,
+          "bat_outs": 68,
+          "bowl_balls": 51,
+          "bowl_runs": 70,
+          "bowl_wkts": 1
+        }
+      }
+    },
+    "R Dravid": {
+      "player_id": "0184dc35",
+      "last_match": "2013-05-24",
+      "career": {
+        "MULTI": {
+          "bat_runs": 5925,
+          "bat_balls": 13733,
+          "bat_outs": 126,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        },
+        "ODI": {
+          "bat_runs": 3723,
+          "bat_balls": 5128,
+          "bat_outs": 98,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        },
+        "T20": {
+          "bat_runs": 2205,
+          "bat_balls": 1903,
+          "bat_outs": 78,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        }
+      }
+    },
+    "A Kumble": {
+      "player_id": "0c2730df",
+      "last_match": "2010-04-24",
+      "career": {
+        "MULTI": {
+          "bat_runs": 893,
+          "bat_balls": 2224,
+          "bat_outs": 48,
+          "bowl_balls": 12032,
+          "bowl_runs": 6069,
+          "bowl_wkts": 191
+        },
+        "ODI": {
+          "bat_runs": 108,
+          "bat_balls": 254,
+          "bat_outs": 12,
+          "bowl_balls": 1489,
+          "bowl_runs": 1144,
+          "bowl_wkts": 28
+        },
+        "T20": {
+          "bat_runs": 35,
+          "bat_balls": 47,
+          "bat_outs": 3,
+          "bowl_balls": 965,
+          "bowl_runs": 1058,
+          "bowl_wkts": 45
+        }
+      }
+    },
+    "JH Kallis": {
+      "player_id": "86dc8f2e",
+      "last_match": "2016-01-24",
+      "career": {
+        "MULTI": {
+          "bat_runs": 7405,
+          "bat_balls": 14867,
+          "bat_outs": 137,
+          "bowl_balls": 9879,
+          "bowl_runs": 4798,
+          "bowl_wkts": 141
+        },
+        "ODI": {
+          "bat_runs": 4929,
+          "bat_balls": 6453,
+          "bat_outs": 111,
+          "bowl_balls": 3871,
+          "bowl_runs": 3305,
+          "bowl_wkts": 92
+        },
+        "T20": {
+          "bat_runs": 3711,
+          "bat_balls": 3298,
+          "bat_outs": 125,
+          "bowl_balls": 2405,
+          "bowl_runs": 3073,
+          "bowl_wkts": 96
+        }
+      }
+    },
+    "KC Sangakkara": {
+      "player_id": "6b71e6cf",
+      "last_match": "2018-03-13",
+      "career": {
+        "MULTI": {
+          "bat_runs": 11608,
+          "bat_balls": 20315,
+          "bat_outs": 186,
+          "bowl_balls": 78,
+          "bowl_runs": 45,
+          "bowl_wkts": 0
+        },
+        "ODI": {
+          "bat_runs": 12952,
+          "bat_balls": 15703,
+          "bat_outs": 273,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        },
+        "T20": {
+          "bat_runs": 6091,
+          "bat_balls": 4886,
+          "bat_outs": 210,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        }
+      }
+    },
+    "DPMD Jayawardene": {
+      "player_id": "d18f9182",
+      "last_match": "2017-02-25",
+      "career": {
+        "MULTI": {
+          "bat_runs": 6615,
+          "bat_balls": 12899,
+          "bat_outs": 131,
+          "bowl_balls": 167,
+          "bowl_runs": 96,
+          "bowl_wkts": 2
+        },
+        "ODI": {
+          "bat_runs": 8309,
+          "bat_balls": 10243,
+          "bat_outs": 245,
+          "bowl_balls": 67,
+          "bowl_runs": 63,
+          "bowl_wkts": 1
+        },
+        "T20": {
+          "bat_runs": 4026,
+          "bat_balls": 3179,
+          "bat_outs": 144,
+          "bowl_balls": 6,
+          "bowl_runs": 8,
+          "bowl_wkts": 0
+        }
+      }
+    },
+    "M Muralitharan": {
+      "player_id": "4ba44e19",
+      "last_match": "2014-05-22",
+      "career": {
+        "MULTI": {
+          "bat_runs": 275,
+          "bat_balls": 355,
+          "bat_outs": 32,
+          "bowl_balls": 11942,
+          "bowl_runs": 5552,
+          "bowl_wkts": 243
+        },
+        "ODI": {
+          "bat_runs": 317,
+          "bat_balls": 379,
+          "bat_outs": 43,
+          "bowl_balls": 6717,
+          "bowl_runs": 4579,
+          "bowl_wkts": 190
+        },
+        "T20": {
+          "bat_runs": 22,
+          "bat_balls": 41,
+          "bat_outs": 10,
+          "bowl_balls": 2394,
+          "bowl_runs": 2559,
+          "bowl_wkts": 105
+        }
+      }
+    },
+    "SL Malinga": {
+      "player_id": "a12e1d51",
+      "last_match": "2020-03-06",
+      "career": {
+        "MULTI": {
+          "bat_runs": 255,
+          "bat_balls": 536,
+          "bat_outs": 18,
+          "bowl_balls": 3791,
+          "bowl_runs": 2470,
+          "bowl_wkts": 69
+        },
+        "ODI": {
+          "bat_runs": 508,
+          "bat_balls": 689,
+          "bat_outs": 78,
+          "bowl_balls": 10336,
+          "bowl_runs": 9251,
+          "bowl_wkts": 322
+        },
+        "T20": {
+          "bat_runs": 246,
+          "bat_balls": 274,
+          "bat_outs": 37,
+          "bowl_balls": 5155,
+          "bowl_runs": 6196,
+          "bowl_wkts": 303
+        }
+      }
+    },
+    "DW Steyn": {
+      "player_id": "8fd1a8f5",
+      "last_match": "2021-03-03",
+      "career": {
+        "MULTI": {
+          "bat_runs": 1291,
+          "bat_balls": 2894,
+          "bat_outs": 96,
+          "bowl_balls": 18862,
+          "bowl_runs": 10043,
+          "bowl_wkts": 451
+        },
+        "ODI": {
+          "bat_runs": 373,
+          "bat_balls": 569,
+          "bat_outs": 40,
+          "bowl_balls": 6351,
+          "bowl_runs": 5209,
+          "bowl_wkts": 196
+        },
+        "T20": {
+          "bat_runs": 245,
+          "bat_balls": 246,
+          "bat_outs": 31,
+          "bowl_balls": 4309,
+          "bowl_runs": 4943,
+          "bowl_wkts": 234
+        }
+      }
+    },
+    "AB de Villiers": {
+      "player_id": "c4487b84",
+      "last_match": "2021-10-11",
+      "career": {
+        "MULTI": {
+          "bat_runs": 8182,
+          "bat_balls": 14930,
+          "bat_outs": 158,
+          "bowl_balls": 204,
+          "bowl_runs": 104,
+          "bowl_wkts": 2
+        },
+        "ODI": {
+          "bat_runs": 9435,
+          "bat_balls": 9323,
+          "bat_outs": 175,
+          "bowl_balls": 192,
+          "bowl_runs": 202,
+          "bowl_wkts": 7
+        },
+        "T20": {
+          "bat_runs": 8734,
+          "bat_balls": 5860,
+          "bat_outs": 237,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        }
+      }
+    },
+    "BB McCullum": {
+      "player_id": "b8a55852",
+      "last_match": "2019-02-08",
+      "career": {
+        "MULTI": {
+          "bat_runs": 5825,
+          "bat_balls": 8877,
+          "bat_outs": 151,
+          "bowl_balls": 199,
+          "bowl_runs": 94,
+          "bowl_wkts": 1
+        },
+        "ODI": {
+          "bat_runs": 5385,
+          "bat_balls": 5525,
+          "bat_outs": 167,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        },
+        "T20": {
+          "bat_runs": 7990,
+          "bat_balls": 5896,
+          "bat_outs": 269,
+          "bowl_balls": 6,
+          "bowl_runs": 13,
+          "bowl_wkts": 0
+        }
+      }
+    },
+    "Mohammad Hafeez": {
+      "player_id": "9ab63e7b",
+      "last_match": "2023-03-11",
+      "career": {
+        "MULTI": {
+          "bat_runs": 3321,
+          "bat_balls": 5740,
+          "bat_outs": 90,
+          "bowl_balls": 3719,
+          "bowl_runs": 1684,
+          "bowl_wkts": 51
+        },
+        "ODI": {
+          "bat_runs": 6351,
+          "bat_balls": 8179,
+          "bat_outs": 187,
+          "bowl_balls": 7217,
+          "bowl_runs": 4989,
+          "bowl_wkts": 128
+        },
+        "T20": {
+          "bat_runs": 5218,
+          "bat_balls": 4467,
+          "bat_outs": 217,
+          "bowl_balls": 2717,
+          "bowl_runs": 2995,
+          "bowl_wkts": 115
+        }
+      }
+    },
+    "M Raj": {
+      "player_id": "ec2269dc",
+      "last_match": "2022-03-27",
+      "career": {
+        "MULTI": {
+          "bat_runs": 137,
+          "bat_balls": 390,
+          "bat_outs": 6,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        },
+        "ODI": {
+          "bat_runs": 2949,
+          "bat_balls": 4234,
+          "bat_outs": 51,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        },
+        "T20": {
+          "bat_runs": 1379,
+          "bat_balls": 1440,
+          "bat_outs": 39,
+          "bowl_balls": 0,
+          "bowl_runs": 0,
+          "bowl_wkts": 0
+        }
+      }
+    },
+    "CM Edwards": {
+      "player_id": "d4188b60",
+      "last_match": "2017-09-01",
+      "career": {
+        "MULTI": {
+          "bat_runs": 563,
+          "bat_balls": 1436,
+          "bat_outs": 14,
+          "bowl_balls": 241,
+          "bowl_runs": 104,
+          "bowl_wkts": 3
+        },
+        "ODI": {
+          "bat_runs": 1054,
+          "bat_balls": 1426,
+          "bat_outs": 24,
+          "bowl_balls": 46,
+          "bowl_runs": 51,
+          "bowl_wkts": 1
+        },
+        "T20": {
+          "bat_runs": 1511,
+          "bat_balls": 1493,
+          "bat_outs": 54,
+          "bowl_balls": 27,
+          "bowl_runs": 42,
+          "bowl_wkts": 0
+        }
+      }
+    }
+  }
+}

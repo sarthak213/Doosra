@@ -7,6 +7,7 @@ easy to test standalone and easy to wrap for whichever agent framework
 graph.py ends up using.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -113,7 +114,11 @@ def search_player(name: str, limit: int = 5) -> list[str]:
 
 def warm_caches() -> None:
     """Load the name catalog eagerly (called on FastAPI startup) so the
-    first user-facing query isn't slowed by a cold cache."""
+    first user-facing query isn't slowed by a cold cache. Without a
+    database the server still starts; requests report the problem."""
+    if not Path(db.DB_PATH).exists():
+        print(f"No database at {db.DB_PATH}: run `python -m ingest.pull` (see README).")
+        return
     catalog.get_catalog()
 
 
@@ -143,6 +148,12 @@ def get_stats() -> dict:
         tournaments = con.execute(
             "SELECT COUNT(DISTINCT event_name) FROM matches WHERE event_name IS NOT NULL"
         ).fetchone()[0]
-        return {"matches": matches, "deliveries": deliveries, "tournaments": tournaments}
+        out = {"matches": matches, "deliveries": deliveries, "tournaments": tournaments}
+        # When and from what the data was built (databases from newer ingests).
+        if con.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'build_info'").fetchone()[0]:
+            info = {k: json.loads(v) for k, v in con.execute("SELECT key, value FROM build_info").fetchall()}
+            out["data"] = {"built_at": info.get("built_at"), "latest_match": info.get("latest_match_date"),
+                           "schema_version": info.get("schema_version")}
+        return out
     finally:
         con.close()

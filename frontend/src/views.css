@@ -899,3 +899,19 @@ select:focus,
     width: 100%;
   }
 }
+
+/* ---------- Footer ---------- */
+
+.app-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  justify-content: center;
+  padding: 18px 24px 28px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--cream-dim);
+}
+.app-footer a {
+  color: var(--brass);
+}

@@ -275,11 +275,14 @@ class TestMatchup:
 
 
 class TestSuperOvers:
-    def test_super_over_innings_excluded(self, fixture_db_path, tmp_path, monkeypatch):
-        """A limited-overs innings_num > 2 is a super over and must not count."""
+    @pytest.mark.parametrize("flag_column", [True, False], ids=["is_super_over flag", "innings fallback"])
+    def test_super_over_innings_excluded(self, fixture_db_path, tmp_path, monkeypatch, flag_column):
+        """Super overs aren't part of anyone's record: excluded via the
+        is_super_over flag, or -- on databases without it -- by treating
+        limited-overs innings beyond the second as super overs."""
         import duckdb
 
-        from analytics import db
+        from analytics import catalog, db
 
         db_file = tmp_path / "so.duckdb"
         con = duckdb.connect(str(db_file))
@@ -289,10 +292,13 @@ class TestSuperOvers:
         con.execute("CREATE TABLE deliveries AS SELECT * FROM src.deliveries")
         # A super over for match_c: Warner smashes 20 off Bumrah.
         con.execute("""
-            INSERT INTO deliveries (match_id, innings_num, batting_team, over_num, ball_in_over, batter, bowler,
-                                    non_striker, runs_batter, runs_extras, runs_total, is_wicket)
-            VALUES ('match_c', 3, 'Australia', 0, 1, 'D Warner', 'J Bumrah', 'G Maxwell', 20, 0, 20, FALSE)
+            INSERT INTO deliveries (match_id, innings_num, batting_team, is_super_over, over_num, ball_in_over,
+                                    batter, bowler, non_striker, runs_batter, runs_extras, runs_total, is_wicket)
+            VALUES ('match_c', 3, 'Australia', TRUE, 0, 1, 'D Warner', 'J Bumrah', 'G Maxwell', 20, 0, 20, FALSE)
         """)
+        if not flag_column:
+            con.execute("ALTER TABLE deliveries DROP COLUMN is_super_over")
         con.close()
         monkeypatch.setattr(db, "DB_PATH", db_file)
+        catalog.invalidate()
         assert row(stats.player_stats("D Warner", role="batting"))["runs"] == 12

@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import Footer from "./components/Footer.jsx";
 import Masthead from "./components/Masthead.jsx";
 import CopilotDrawer from "./copilot/CopilotDrawer.jsx";
 import { CopilotProvider, useCopilot } from "./copilot/CopilotProvider.jsx";
@@ -27,6 +28,7 @@ function Shell() {
           <Route path="/ask" element={<AskView />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        <Footer />
       </div>
       <CopilotDrawer />
     </div>
