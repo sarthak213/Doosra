@@ -5,7 +5,9 @@ import CopilotDrawer from "./copilot/CopilotDrawer.jsx";
 import { CopilotProvider, useCopilot } from "./copilot/CopilotProvider.jsx";
 import AskView from "./views/AskView.jsx";
 import CompareStudio from "./views/CompareStudio.jsx";
+import DataCoverage from "./views/DataCoverage.jsx";
 import Home from "./views/Home.jsx";
+import Methodology from "./views/Methodology.jsx";
 import PlayerHub from "./views/PlayerHub.jsx";
 import PlayerMatrix from "./views/PlayerMatrix.jsx";
 import QueryBuilder from "./views/QueryBuilder.jsx";
@@ -26,10 +28,12 @@ function Shell() {
           <Route path="/query" element={<QueryBuilder />} />
           <Route path="/matrix" element={<PlayerMatrix />} />
           <Route path="/ask" element={<AskView />} />
+          <Route path="/methodology/fibs" element={<Methodology />} />
+          <Route path="/data" element={<DataCoverage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-        <Footer />
       </div>
+      <Footer />
       <CopilotDrawer />
     </div>
   );

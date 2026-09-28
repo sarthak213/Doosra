@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from . import catalog
+from . import catalog, db
 from .catalog import ResolutionError
 
 # Dismissal kinds credited to the bowler.
@@ -183,6 +183,18 @@ class Scope:
         return dict(self.applied)
 
 
+LATEST_SEASON = ("latest", "current", "this season", "most recent")
+
+
+def _latest_season(s: Scope) -> str | None:
+    """The most recent season among matches that pass the filters resolved
+    so far (competition, format, gender, teams, venue)."""
+    clauses = s.match_clauses()
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = db.query(f"SELECT m.season FROM matches m {where} ORDER BY m.date DESC LIMIT 1")
+    return rows[0]["season"] if rows and rows[0]["season"] else None
+
+
 def _to_int(value, name: str) -> int | None:
     if value is None or value == "":
         return None
@@ -267,8 +279,13 @@ def build_scope(
 
     if season:
         season = str(season).strip()
+        if season.lower() in LATEST_SEASON:
+            season = _latest_season(s)
+            if season is None:
+                raise ResolutionError("season", "latest", "No matches with these filters, so there's no latest season.")
+            s.notes.append(f"Latest season with these filters: {season}.")
         if not re.fullmatch(r"\d{4}(/\d{2})?", season):
-            raise ResolutionError("season", season, "season must look like '2024' or '2023/24'.")
+            raise ResolutionError("season", season, "season must look like '2024', '2023/24' or 'latest'.")
         s.season = season
         s.applied["season"] = season
 
@@ -286,8 +303,14 @@ def build_scope(
         )
 
     s.innings = _to_int(innings, "innings")
+    if s.innings is not None and not 1 <= s.innings <= 4:
+        raise ResolutionError("innings", str(innings), "innings must be 1-4 (3 and 4 exist only in Tests and "
+                                                     "first-class matches).")
     if s.innings:
         s.applied["innings"] = s.innings
+        if s.innings > 2 and s.match_types and not set(s.match_types) & {"Test", "MDM"}:
+            s.notes.append(f"Innings {s.innings} only exists in multi-day matches, so this {s.applied.get('format')} "
+                           "filter matches nothing.")
 
     return s
 

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { apiGet, apiSend, playerPath } from "../api.js";
 import { useCopilotContext } from "../copilot/CopilotProvider.jsx";
 import { LineChartKit, Heatmap, PercentileBars } from "../components/kit/Charts.jsx";
@@ -18,9 +18,11 @@ const SPLIT_METRICS = {
 };
 const CARDS = {
   batting: [["matches", "innings", "runs", "average", "strike_rate", "highest", "hundreds", "fifties"],
-    ["true_sr", "true_average", "match_factor", "era_factor", "first5_sr", "conversion_pct", "dot_pct", "boundary_pct"]],
+    ["true_sr", "true_average", "match_factor", "era_factor", "first5_sr", "conversion_pct", "dot_pct", "boundary_pct"],
+    ["fib_average", "regressed_average", "regressed_sr", "dismissal_luck", "runs_luck"]],
   bowling: [["matches", "innings", "wickets", "average", "economy", "strike_rate", "best", "five_wkt_hauls"],
-    ["true_economy", "true_wickets", "match_factor", "dot_pct", "boundary_pct"]],
+    ["true_economy", "true_wickets", "match_factor", "dot_pct", "boundary_pct"],
+    ["fib_economy", "fib_average", "regressed_economy", "regressed_average", "wicket_luck", "runs_luck"]],
 };
 
 function StatCards({ row, ids, metrics, role, context }) {
@@ -145,6 +147,9 @@ export default function PlayerHub() {
                 {p.gender === "female" ? " · women's cricket" : ""}
               </p>
               {p.note && <p className="resolution-note">{p.note}</p>}
+              {p.coverage_notes?.map((n) => (
+                <p className="coverage-note" key={n}>{n} <Link to="/data">What's missing</Link></p>
+              ))}
             </>
           ) : <h1>{name}</h1>}
         </div>
@@ -178,6 +183,10 @@ export default function PlayerHub() {
           <StatCards row={summaryRow} ids={CARDS[role][0]} metrics={metrics} role={role} />
           <p className="section-label">Context-adjusted</p>
           <StatCards row={summaryRow} ids={CARDS[role][1]} metrics={metrics} role={role} context />
+          <p className="section-label">
+            Skill vs luck <Link to="/methodology/fibs" className="section-link">how this works</Link>
+          </p>
+          <StatCards row={summaryRow} ids={CARDS[role][2]} metrics={metrics} role={role} context />
         </Panel>
       )}
 

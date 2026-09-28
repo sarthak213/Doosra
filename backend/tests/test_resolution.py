@@ -108,6 +108,20 @@ class TestScope:
         with pytest.raises(ResolutionError):
             build_scope(season="last year")
 
+    def test_innings_one_to_four(self):
+        assert build_scope(innings=4).innings == 4
+        with pytest.raises(ResolutionError):
+            build_scope(innings=5)
+        s = build_scope(format="T20I", innings=3)
+        assert any("only exists in multi-day" in n for n in s.notes)
+
+    def test_latest_season_respects_the_other_filters(self):
+        # Men's matches: 2023/24 (Test Bash League) and 2024/25; women's: 2023/24.
+        assert build_scope(season="latest", gender="male").season == "2024/25"
+        assert build_scope(season="latest", gender="female").season == "2023/24"
+        s = build_scope(competition="Test Bash League", season="latest")
+        assert s.season == "2023/24" and any("Latest season" in n for n in s.notes)
+
     def test_literals_are_escaped(self):
         from analytics.scope import lit
         assert lit("Lord's") == "'Lord''s'"

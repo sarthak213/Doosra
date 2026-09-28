@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from analytics import catalog, engine, registry
+from analytics import catalog, coverage, engine, registry
 from analytics.scope import normalize_filters
 
 from . import workspace
@@ -130,6 +130,43 @@ class CompareBody(BaseModel):
     metrics: list[str] | None = None
     arc_metric: str = "average"
     filters: dict | None = None
+
+
+# ---------------------------------------------------------------------------
+# Data coverage (the Data page)
+# ---------------------------------------------------------------------------
+
+@router.get("/coverage")
+def data_coverage(gender: str | None = None):
+    return _ok(coverage.data_coverage(gender=gender))
+
+
+@router.get("/coverage/missing")
+def missing(format: str | None = None, competition: str | None = None, gender: str | None = None,  # noqa: A002
+            team: str | None = None, from_year: int | None = None, to_year: int | None = None, limit: int = 500):
+    return _ok(coverage.missing_matches(format=format, competition=competition, gender=gender, team=team,
+                                        from_year=from_year, to_year=to_year, limit=limit))
+
+
+# ---------------------------------------------------------------------------
+# FIBS (the methodology page)
+# ---------------------------------------------------------------------------
+
+@router.get("/fibs/report")
+def fibs_report(format: str = "T20", gender: str = "male", role: Role = "bowling"):  # noqa: A002
+    return _ok(engine.fibs_report(format=format, gender=gender, role=role))
+
+
+@router.get("/fibs/pairs")
+def fibs_pairs(metric: str = "dot", format: str = "T20", gender: str = "male", role: Role = "bowling",  # noqa: A002
+               limit: int = 1500):
+    return _ok(engine.fibs_pairs(metric=metric, format=format, gender=gender, role=role, limit=limit))
+
+
+@router.get("/fibs/luck")
+def fibs_luck(role: Role = "bowling", unlucky: bool = False, by: str | None = None, limit: int = 15,
+              min_balls: int | None = None, filters: dict = Depends(filter_params)):
+    return _ok(engine.luck_leaderboard(role=role, unlucky=unlucky, by=by, limit=limit, min_balls=min_balls, **filters))
 
 
 @router.post("/compare")
