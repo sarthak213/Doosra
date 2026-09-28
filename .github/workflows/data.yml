@@ -1,0 +1,100 @@
+name: Data release
+
+# Rebuilds the database from Cricsheet, validates it, and publishes it as a
+# GitHub Release: data-YYYY-MM-DD plus a moving data-latest, which
+# `python -m ingest.pull` installs.
+
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: data-release
+  cancel-in-progress: false
+
+env:
+  KEEP_DATED_RELEASES: 8
+
+jobs:
+  build:
+    # Releases are published from main only (schedules always run there;
+    # this stops a manual run from another branch publishing).
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+
+      - name: Download from Cricsheet
+        run: |
+          mkdir -p data/raw
+          curl -fsSL --retry 3 -o data/raw/all_json.zip https://cricsheet.org/downloads/all_json.zip
+          curl -fsSL --retry 3 -o data/raw/people.csv https://cricsheet.org/register/people.csv
+          curl -fsSL --retry 3 -o data/raw/names.csv https://cricsheet.org/register/names.csv
+          sha256sum data/raw/*
+
+      - name: Build database
+        run: |
+          python ingest/build_db.py --zip data/raw/all_json.zip --register-dir data/raw --out data/cricket.duckdb
+          python -m analytics.build
+
+      - name: Validate
+        run: |
+          gh release download data-latest -p manifest.json -D prev || echo "No previous release"
+          if [ -f prev/manifest.json ]; then
+            python -m ingest.validate --db data/cricket.duckdb --previous prev/manifest.json
+          else
+            python -m ingest.validate --db data/cricket.duckdb
+          fi
+
+      - name: Package
+        run: |
+          TAG="data-$(date -u +%Y-%m-%d)"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          mkdir -p ../dist
+          zstd -19 -T0 -q data/cricket.duckdb -o ../dist/cricket.duckdb.zst
+          python -m ingest.manifest --db data/cricket.duckdb --asset ../dist/cricket.duckdb.zst \
+            --tag "$TAG" --out ../dist/manifest.json
+          cp ../DATA_NOTICE.md ../dist/
+          python - <<'EOF' > ../dist/notes.md
+          import json
+          m = json.load(open("../dist/manifest.json"))
+          r = m["rows"]
+          print(f"Cricket database built {m['built_at']}, matches up to {m['latest_match']}.\n")
+          print(f"- {r['matches']:,} matches, {r['deliveries']:,} deliveries, {r.get('people', 0):,} people")
+          print(f"- schema {m['schema_version']}, code {m['git_sha']}\n")
+          print("Install with `python -m ingest.pull` from `backend/`.\n")
+          print(m["attribution"] + " See DATA_NOTICE.md.")
+          EOF
+          ls -la ../dist
+
+      - name: Publish
+        working-directory: dist
+        run: |
+          FILES="cricket.duckdb.zst manifest.json DATA_NOTICE.md"
+          for T in "$TAG" data-latest; do
+            gh release delete "$T" --cleanup-tag -y || true
+          done
+          gh release create "$TAG" $FILES --title "Data $TAG" --notes-file notes.md --target "$GITHUB_SHA" --latest=false
+          gh release create data-latest $FILES --title "Data (latest: $TAG)" --notes-file notes.md --target "$GITHUB_SHA" --latest=false
+
+      - name: Prune old dated releases
+        run: |
+          gh release list --limit 200 --json tagName --jq '.[].tagName' \
+            | grep -E '^data-[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort -r | tail -n +$((KEEP_DATED_RELEASES + 1)) \
+            | xargs -r -n1 -I{} gh release delete {} --cleanup-tag -y

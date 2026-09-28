@@ -78,36 +78,44 @@ def invalidate() -> None:
 
 @dataclass
 class Player:
-    name: str
+    name: str               # unique display name (register unique_name, e.g. "Rashid Khan (2)")
     matches: int
     gender: str | None
     teams: list[str]
     first: str | None
     last: str | None
     international: bool
-    tokens: list[str] = field(default_factory=list)       # normalized tokens
+    raw_name: str = ""      # the name as written in match data (not unique across people)
+    player_id: str | None = None   # Cricsheet register identifier
+    cricinfo_id: str | None = None
+    tokens: list[str] = field(default_factory=list)       # normalized tokens of raw_name
     initials_flags: list[bool] = field(default_factory=list)  # token is a block of initials ("RG")
 
     def describe(self) -> dict:
         span = f"{(self.first or '')[:4]}-{(self.last or '')[:4]}"
-        return {
+        out = {
             "name": self.name,
             "matches": self.matches,
             "gender": self.gender,
             "teams": self.teams,
             "span": span,
         }
+        if self.cricinfo_id:
+            out["cricinfo_url"] = f"https://www.espncricinfo.com/cricketers/player-{self.cricinfo_id}"
+        return out
 
 
 @dataclass
 class Catalog:
-    players: dict[str, Player]
+    players: dict[str, Player]                  # keyed by unique display name
     players_by_last_token: dict[str, list[Player]]
+    players_by_alt_name: dict[str, list[Player]]    # normalized register alternate name -> people
     teams: dict[str, dict[str, int]]          # team -> {gender: matches}
     events: dict[str, dict]                    # event_name -> {matches, genders, formats}
     venues: dict[str, dict]                    # raw venue -> {matches, city, base}
     has_new_schema: bool
     has_wickets_table: bool
+    delivery_columns: frozenset
     has_derived_tables: bool
     date_min: str | None
     date_max: str | None
@@ -116,11 +124,23 @@ class Catalog:
     def load(cls) -> "Catalog":
         con = db.connect()
         try:
+            tables = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+            pm_cols = {r[0] for r in con.execute("DESCRIBE players_matches").fetchall()}
+            has_register = "people" in tables and "player_id" in pm_cols
+            # One identity per person: the register's unique name when the
+            # database has the register (namesakes then stay apart), else the
+            # plain match-data name.
+            if has_register:
+                ident, join = "COALESCE(pe.unique_name, pm.player)", "LEFT JOIN people pe ON pe.identifier = pm.player_id"
+                extra_cols, extra_aggs = ", pm.player_id, pe.key_cricinfo", "any_value(p.player_id), any_value(p.key_cricinfo)"
+            else:
+                ident, join, extra_cols, extra_aggs = "pm.player", "", "", "NULL, NULL"
             prow = con.execute(
-                """
+                f"""
                 WITH pm AS (
-                    SELECT pm.player, pm.team, m.match_id, m.gender, m.date, m.team_type
-                    FROM players_matches pm JOIN matches m ON pm.match_id = m.match_id
+                    SELECT {ident} AS player, pm.player AS raw, pm.team, m.match_id, m.gender, m.date,
+                           m.team_type {extra_cols}
+                    FROM players_matches pm JOIN matches m ON pm.match_id = m.match_id {join}
                 ),
                 team_counts AS (
                     SELECT player, team, COUNT(*) AS n,
@@ -129,7 +149,8 @@ class Catalog:
                 )
                 SELECT p.player, COUNT(DISTINCT p.match_id), mode(p.gender), MIN(p.date), MAX(p.date),
                        BOOL_OR(p.team_type = 'international'),
-                       (SELECT list(team ORDER BY rk) FROM team_counts t WHERE t.player = p.player AND rk <= 3)
+                       (SELECT list(team ORDER BY rk) FROM team_counts t WHERE t.player = p.player AND rk <= 3),
+                       any_value(p.raw), {extra_aggs}
                 FROM pm p
                 WHERE p.player IS NOT NULL
                 GROUP BY p.player
@@ -160,17 +181,24 @@ class Catalog:
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'deliveries_wickets'"
             ).fetchone()[0])
             dmin, dmax = con.execute("SELECT MIN(date), MAX(date) FROM matches").fetchone()
-            tables = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+            # Register alternate names ("Virat Kohli" for V Kohli), for people
+            # who appear in the match data.
+            alt_rows = con.execute("""
+                SELECT DISTINCT pn.name, COALESCE(pe.unique_name, pe.name)
+                FROM people_names pn JOIN people pe ON pe.identifier = pn.identifier
+                WHERE pn.identifier IN (SELECT player_id FROM players_matches)
+            """).fetchall() if has_register and "people_names" in tables else []
         finally:
             con.close()
 
         players: dict[str, Player] = {}
         by_last: dict[str, list[Player]] = {}
-        for name, n, gender, first, last, intl, teams in prow:
-            raw_tokens = name.replace(".", " ").split()
+        for name, n, gender, first, last, intl, teams, raw, pid, cricinfo in prow:
+            raw_tokens = (raw or name).replace(".", " ").split()
             p = Player(
                 name=name, matches=n, gender=gender, teams=list(teams or []),
                 first=first, last=last, international=bool(intl),
+                raw_name=raw or name, player_id=pid, cricinfo_id=cricinfo,
                 tokens=[norm(t) for t in raw_tokens],
                 initials_flags=[_is_initials_token(t) for t in raw_tokens],
             )
@@ -179,6 +207,12 @@ class Catalog:
                 continue
             players[name] = p
             by_last.setdefault(p.tokens[-1], []).append(p)
+
+        by_alt: dict[str, list[Player]] = {}
+        for alt, uname in alt_rows:
+            p = players.get(uname)
+            if p is not None and p not in by_alt.setdefault(norm(alt), []):
+                by_alt[norm(alt)].append(p)
 
         teams: dict[str, dict[str, int]] = {}
         for team, gender, n in trow:
@@ -195,8 +229,9 @@ class Catalog:
             venues[venue] = {"matches": n, "city": city, "base": norm(base)}
 
         return cls(
-            players=players, players_by_last_token=by_last, teams=teams, events=events, venues=venues,
-            has_new_schema="extra_wides" in cols, has_wickets_table=has_wk,
+            players=players, players_by_last_token=by_last, players_by_alt_name=by_alt,
+            teams=teams, events=events, venues=venues,
+            has_new_schema="extra_wides" in cols, has_wickets_table=has_wk, delivery_columns=frozenset(cols),
             has_derived_tables={"batting_innings", "bowling_innings", "batting_phase", "bowling_phase"} <= tables,
             date_min=dmin, date_max=dmax,
         )
@@ -341,6 +376,12 @@ def rank_players(query: str, gender: str | None = None, limit: int = 5) -> list[
     if gender:
         pool = [p for p in pool if p.gender == gender]
 
+    # A register unique name that differs from the match-data name ("Rashid
+    # Khan (2)") is an explicit pick of one namesake: take it as given.
+    for p in pool:
+        if p.name != p.raw_name and norm(p.name) == qn:
+            return [(1000.0, 100.0, p)]
+
     alias = PLAYER_ALIASES.get(qn)
     if alias and alias in cat.players and (not gender or cat.players[alias].gender == gender):
         p = cat.players[alias]
@@ -350,6 +391,13 @@ def rank_players(query: str, gender: str | None = None, limit: int = 5) -> list[
     q_flags = _query_flags(query, q_tokens)
 
     scored: list[tuple[float, float, Player]] = []
+    # A register alternate name ("Virat Kohli" -> V Kohli) is an exact match;
+    # prominence still ranks it against same-named people.
+    for p in cat.players_by_alt_name.get(qn, []):
+        if gender and p.gender != gender:
+            continue
+        prominence = _PROMINENCE_WEIGHT * math.log10(p.matches + 1) + (8.0 if p.international else 0.0)
+        scored.append((100.0 + prominence, 100.0, p))
     candidates = cat.players_by_last_token.get(q_tokens[-1], [])
     for p in candidates:
         if gender and p.gender != gender:
@@ -389,9 +437,11 @@ def rank_players(query: str, gender: str | None = None, limit: int = 5) -> list[
 
 @dataclass
 class ResolvedPlayer:
-    name: str
+    name: str               # unique display name -- what the derived tables use
     gender: str | None
     note: str | None
+    raw_name: str = ""      # name in the ball-by-ball data (shared by namesakes)
+    player_id: str | None = None
 
 
 def resolve_player(query: str, gender: str | None = None) -> ResolvedPlayer:
@@ -423,7 +473,8 @@ def resolve_player(query: str, gender: str | None = None) -> ResolvedPlayer:
     if norm(top.name) != norm(query):
         teams = ", ".join(top.teams[:2])
         note = f"'{query}' is stored as '{top.name}' ({teams}; {top.matches} matches across all cricket in the data)."
-    return ResolvedPlayer(name=top.name, gender=top.gender, note=note)
+    return ResolvedPlayer(name=top.name, gender=top.gender, note=note, raw_name=top.raw_name or top.name,
+                          player_id=top.player_id)
 
 
 # ---------------------------------------------------------------------------

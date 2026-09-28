@@ -64,32 +64,45 @@ FORMAT_LABEL_SQL = (
 
 YEAR_SQL = "CAST(substr(m.date, 1, 4) AS INTEGER)"
 
-# Cricsheet stores super overs as extra innings (3, 4, ...) of a limited-overs
-# match. They aren't part of anyone's batting/bowling record.
-NOT_SUPER_OVER_SQL = "(m.match_type IN ('Test', 'MDM') OR d.innings_num <= 2)"
 
 
-def ball_exprs(new_schema: bool) -> dict:
-    """Per-delivery scoring rules as SQL over `deliveries d`:
+def ball_exprs(columns) -> dict:
+    """Per-delivery scoring rules as SQL over `deliveries d` (joined to
+    `matches m`), using the best columns the database has:
         faced       -- the batter faced it (a wide isn't faced; a no-ball is)
         legal       -- counts toward the over (not a wide or no-ball)
         bowler_runs -- runs charged to the bowler (byes, leg-byes, penalties aren't)
-    The current schema has per-type extra columns and is exact; the older
-    one kept a single extra type per ball, so a no-ball that also ran byes
-    charges the byes to the bowler there."""
-    if new_schema:
-        return {
-            "faced": "(d.extra_wides IS NULL)",
-            "legal": "(d.extra_wides IS NULL AND d.extra_noballs IS NULL)",
-            # extra_* columns come out of the pandas ingest as DOUBLE; keep runs integral.
-            "bowler_runs": "CAST(d.runs_total - COALESCE(d.extra_byes, 0) - COALESCE(d.extra_legbyes, 0) "
-                           "- COALESCE(d.extra_penalty, 0) AS BIGINT)",
-        }
-    return {
-        "faced": "(d.extra_type IS NULL OR d.extra_type <> 'wides')",
-        "legal": "(d.extra_type IS NULL OR d.extra_type NOT IN ('wides', 'noballs'))",
-        "bowler_runs": "(d.runs_total - CASE WHEN d.extra_type IN ('byes', 'legbyes', 'penalty') THEN d.runs_extras ELSE 0 END)",
-    }
+        four / six  -- a boundary (a "4" that was run isn't one)
+        regular     -- not a super over (super overs aren't in anyone's record)
+    `columns` is the set of deliveries columns (a bool is accepted for the
+    old "has per-type extras" flag). Databases from older ingests lack some
+    columns and fall back to approximations: a single extra type per ball
+    (a no-ball that also ran byes charges the byes to the bowler), every
+    4 counted as a boundary, and super overs inferred as limited-overs
+    innings beyond the second."""
+    if isinstance(columns, bool):
+        columns = {"extra_wides"} if columns else set()
+    e = {}
+    if "extra_wides" in columns:
+        e["faced"] = "(d.extra_wides IS NULL)"
+        e["legal"] = "(d.extra_wides IS NULL AND d.extra_noballs IS NULL)"
+        # extra_* columns may be DOUBLE in databases from older ingests; keep runs integral.
+        e["bowler_runs"] = ("CAST(d.runs_total - COALESCE(d.extra_byes, 0) - COALESCE(d.extra_legbyes, 0) "
+                            "- COALESCE(d.extra_penalty, 0) AS BIGINT)")
+    else:
+        e["faced"] = "(d.extra_type IS NULL OR d.extra_type <> 'wides')"
+        e["legal"] = "(d.extra_type IS NULL OR d.extra_type NOT IN ('wides', 'noballs'))"
+        e["bowler_runs"] = ("(d.runs_total - CASE WHEN d.extra_type IN ('byes', 'legbyes', 'penalty') "
+                            "THEN d.runs_extras ELSE 0 END)")
+    if "non_boundary" in columns:
+        e["four"] = "(d.runs_batter = 4 AND NOT COALESCE(d.non_boundary, FALSE))"
+        e["six"] = "(d.runs_batter = 6 AND NOT COALESCE(d.non_boundary, FALSE))"
+    else:
+        e["four"] = "(d.runs_batter = 4)"
+        e["six"] = "(d.runs_batter = 6)"
+    e["regular"] = ("(NOT COALESCE(d.is_super_over, FALSE))" if "is_super_over" in columns
+                    else "(m.match_type IN ('Test', 'MDM') OR d.innings_num <= 2)")
+    return e
 
 
 @dataclass

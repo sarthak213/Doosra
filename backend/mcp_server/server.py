@@ -34,6 +34,7 @@ rate, true average, runs above expected, match factor and era factor)."""
 mcp = FastMCP("doosra", instructions=INSTRUCTIONS, log_level="WARNING")
 
 Role = Literal["batting", "bowling"]
+RoleF = Literal["batting", "bowling", "fielding"]
 Filters = Annotated[dict[str, Any] | None, Field(description=(
     "Optional filters, all plain words: competition ('IPL', 'T20 World Cup', 'Ashes'), format ('Test', 'ODI', "
     "'T20I', 'T20' = all T20 incl. leagues, 'first-class', 'List A', 'international'), gender ('male', "
@@ -70,10 +71,13 @@ def player_profile(player: str, filters: Filters = None) -> dict:
 
 
 @mcp.tool()
-def player_stats(player: str, role: Role = "batting", metrics: Metrics = None, split_by: SplitBy = None,
+def player_stats(player: str, role: RoleF = "batting", metrics: Metrics = None, split_by: SplitBy = None,
                  filters: Filters = None) -> dict:
     """One player's figures in any scope, optionally split (by season, format, opposition, phase, batting
-    position, entry point, dismissal type, ...). Split results include `highlights`."""
+    position, entry point, dismissal type, ...). Split results include `highlights`. role='fielding' gives
+    catches, stumpings and run-outs (split_by: season, year, format, competition, opposition, team)."""
+    if role == "fielding":
+        return stats.player_stats(player, role="fielding", split_by=split_by, **_f(filters))
     return engine.query_stats(role=role, metrics=metrics, players=[player], split_by=split_by, **_f(filters))
 
 
@@ -86,10 +90,13 @@ def compare_players(players: list[str], role: Role = "batting", metrics: Metrics
 
 
 @mcp.tool()
-def leaderboard(metric: str, role: Role = "batting", extra_metrics: Metrics = None, ascending: bool | None = None,
+def leaderboard(metric: str, role: RoleF = "batting", extra_metrics: Metrics = None, ascending: bool | None = None,
                 min_balls: int | None = None, limit: int = 10, filters: Filters = None) -> dict:
     """Rank players by any metric ('who has the most/best/highest ...'). Rate metrics get an automatic
-    minimum-balls qualification unless min_balls is given. Direction defaults to 'best first'."""
+    minimum-balls qualification unless min_balls is given. Direction defaults to 'best first'.
+    role='fielding' ranks by catches, stumpings, run_outs or dismissals."""
+    if role == "fielding":
+        return stats.leaderboard(role="fielding", metric=metric, limit=limit, **_f(filters))
     ms = [metric] + [m for m in (extra_metrics or ["matches", "innings" if role == "batting" else "wickets"])
                      if m != metric]
     return engine.query_stats(role=role, metrics=ms, sort_by=metric, ascending=ascending, min_balls=min_balls,

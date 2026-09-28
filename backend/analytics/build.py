@@ -68,8 +68,10 @@ def build(path: str | Path | None = None, progress=print) -> dict:
     con = db.connect_writable(path)
     try:
         cols = {r[0] for r in con.execute("DESCRIBE deliveries").fetchall()}
-        e = ball_exprs("extra_wides" in cols)
+        e = ball_exprs(cols)
         new_wickets = _has(con, "deliveries_wickets")
+        pm_cols = {r[0] for r in con.execute("DESCRIBE players_matches").fetchall()}
+        has_register = _has(con, "people") and "player_id" in pm_cols
 
         def step(msg, sql):
             t = time.time()
@@ -86,18 +88,36 @@ def build(path: str | Path | None = None, progress=print) -> dict:
             FROM matches m
         """)
 
+        # Person identity. Names in the ball-by-ball data aren't unique across
+        # people (three different "Rashid Khan"s), but within one match each
+        # name maps to one register id. With the register, every player is
+        # identified by the register's unique_name ("Rashid Khan (2)").
+        uname = "COALESCE(pe.unique_name, pm.player)" if has_register else "pm.player"
+        pjoin = "LEFT JOIN people pe ON pe.identifier = pm.player_id" if has_register else ""
+        step("player identities", f"""
+            CREATE OR REPLACE TEMP TABLE idmap AS
+            SELECT pm.match_id, pm.player AS name, any_value({uname}) AS uname
+            FROM players_matches pm {pjoin}
+            GROUP BY pm.match_id, pm.player
+        """)
+
         # Every delivery (super overs excluded) with scoring-rule flags.
         step("deliveries", f"""
             CREATE OR REPLACE TEMP TABLE b0 AS
             SELECT d.match_id, d.innings_num, d.batting_team, d.over_num, d.ball_in_over,
                    d.over_num * 1000 + d.ball_in_over AS seq,
-                   d.batter, d.bowler, d.non_striker, d.runs_batter, d.runs_total,
+                   COALESCE(ib.uname, d.batter) AS batter, COALESCE(iw.uname, d.bowler) AS bowler,
+                   COALESCE(ins.uname, d.non_striker) AS non_striker, d.runs_batter, d.runs_total,
                    d.is_wicket, d.wicket_kind, d.player_dismissed,
                    {e['faced']} AS faced, {e['legal']} AS legal, {e['bowler_runs']} AS bowler_runs,
+                   {e['four']} AS is_four, {e['six']} AS is_six,
                    ({PHASE_SQL}) AS phase,
                    {FGROUP_SQL} AS fgroup, m.gender, CAST(substr(m.date, 1, 4) AS INTEGER) AS yr
             FROM deliveries d JOIN matches m ON d.match_id = m.match_id
-            WHERE m.match_type IN ('Test', 'MDM') OR d.innings_num <= 2
+            LEFT JOIN idmap ib ON ib.match_id = d.match_id AND ib.name = d.batter
+            LEFT JOIN idmap iw ON iw.match_id = d.match_id AND iw.name = d.bowler
+            LEFT JOIN idmap ins ON ins.match_id = d.match_id AND ins.name = d.non_striker
+            WHERE {e['regular']}
         """)
 
         # One row per wicket (every wicket on a ball on the current schema).
@@ -109,7 +129,11 @@ def build(path: str | Path | None = None, progress=print) -> dict:
             wsrc = """SELECT match_id, innings_num, over_num * 1000 + ball_in_over AS seq,
                              wicket_kind AS kind, player_dismissed AS player_out
                       FROM deliveries WHERE is_wicket"""
-        step("wickets", f"CREATE OR REPLACE TEMP TABLE wk AS {wsrc}")
+        step("wickets", f"""
+            CREATE OR REPLACE TEMP TABLE wk AS
+            SELECT w.match_id, w.innings_num, w.seq, w.kind, COALESCE(i.uname, w.player_out) AS player_out
+            FROM ({wsrc}) w LEFT JOIN idmap i ON i.match_id = w.match_id AND i.name = w.player_out
+        """)
 
         step("ball state", f"""
             CREATE OR REPLACE TEMP TABLE b AS
@@ -203,7 +227,7 @@ def build(path: str | Path | None = None, progress=print) -> dict:
             WITH agg AS (
                 SELECT match_id, innings_num, batter AS player,
                        SUM(runs_batter) AS runs, SUM(CAST(faced AS INTEGER)) AS balls,
-                       SUM(CAST(runs_batter = 4 AS INTEGER)) AS fours, SUM(CAST(runs_batter = 6 AS INTEGER)) AS sixes,
+                       SUM(CAST(is_four AS INTEGER)) AS fours, SUM(CAST(is_six AS INTEGER)) AS sixes,
                        SUM(CAST(faced AND runs_batter = 0 AS INTEGER)) AS dots,
                        SUM(CASE WHEN faced THEN exp_bat_runs ELSE 0 END) AS exp_runs,
                        SUM(CASE WHEN faced THEN exp_bat_out ELSE 0 END) AS exp_outs,
@@ -295,7 +319,7 @@ def build(path: str | Path | None = None, progress=print) -> dict:
             WITH agg AS (
                 SELECT match_id, innings_num, batter AS player, phase,
                        SUM(runs_batter) AS runs, SUM(CAST(faced AS INTEGER)) AS balls,
-                       SUM(CAST(runs_batter = 4 AS INTEGER)) AS fours, SUM(CAST(runs_batter = 6 AS INTEGER)) AS sixes,
+                       SUM(CAST(is_four AS INTEGER)) AS fours, SUM(CAST(is_six AS INTEGER)) AS sixes,
                        SUM(CAST(faced AND runs_batter = 0 AS INTEGER)) AS dots,
                        SUM(CASE WHEN faced THEN exp_bat_runs ELSE 0 END) AS exp_runs,
                        SUM(CASE WHEN faced THEN exp_bat_out ELSE 0 END) AS exp_outs
@@ -325,7 +349,7 @@ def build(path: str | Path | None = None, progress=print) -> dict:
         bowl_aggs = """
                        SUM(CAST(legal AS INTEGER)) AS balls, COUNT(*) AS deliveries, SUM(bowler_runs) AS runs,
                        SUM(credited) AS wickets, SUM(CAST(legal AND bowler_runs = 0 AS INTEGER)) AS dots,
-                       SUM(CAST(runs_batter = 4 AS INTEGER)) AS fours, SUM(CAST(runs_batter = 6 AS INTEGER)) AS sixes,
+                       SUM(CAST(is_four AS INTEGER)) AS fours, SUM(CAST(is_six AS INTEGER)) AS sixes,
                        SUM(exp_bowl_runs) AS exp_runs, SUM(exp_bowl_wkt) AS exp_wkts"""
         step("bowling innings", f"""
             CREATE OR REPLACE TABLE bowling_innings AS

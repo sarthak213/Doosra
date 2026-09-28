@@ -7,6 +7,7 @@ Skipped entirely when data/cricket.duckdb is absent (e.g. CI without data).
 """
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ from agent import tools as tools_mod
 from analytics import db
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-REAL_DB = BACKEND_DIR / "data" / "cricket.duckdb"
+REAL_DB = BACKEND_DIR / "data" / os.environ.get("DOOSRA_EVAL_DB", "cricket.duckdb")
 EVAL_FILE = Path(__file__).parent / "eval_fixtures" / "eval_questions.json"
 
 pytestmark = pytest.mark.skipif(not REAL_DB.exists(), reason="data/cricket.duckdb not present")

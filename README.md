@@ -6,13 +6,21 @@ strike rate, match factor, era factor...) and an AI copilot that can explain
 any view or drive the app. Every analytics capability is also an MCP tool, so
 any MCP-capable app (Claude Desktop and others) can use it directly.
 
-Data source: [Cricsheet](https://cricsheet.org/) (free, no auth required).
+Data: [Cricsheet](https://cricsheet.org/) ball-by-ball data and register,
+under the [ODC-By 1.0](https://opendatacommons.org/licenses/by/1-0/) licence
+(see [DATA_NOTICE.md](DATA_NOTICE.md)). Rebuilt weekly by GitHub Actions and
+published as a release the app downloads.
 
 ## Architecture
 
 ```text
 backend/
-├── ingest/build_db.py      # Cricsheet JSON -> normalized DuckDB tables (batched)
+├── ingest/                 # the data pipeline
+│   ├── build_db.py         #   Cricsheet zip/JSON + register -> DuckDB tables (batched)
+│   ├── validate.py         #   release gate: schema, counts, invariants, frozen careers
+│   ├── manifest.py         #   release manifest (hashes, counts, build date)
+│   ├── pull.py             #   download + verify + install the published database
+│   └── update.py           #   rebuild locally from Cricsheet (no CI needed)
 ├── analytics/              # the analytics layer (no LLM involved)
 │   ├── db.py               #   the one place that opens the database (read-only)
 │   ├── catalog.py          #   name resolution: players, competitions, teams, venues, formats
@@ -44,16 +52,15 @@ so a number on screen and a number the copilot quotes are the same number.
 cd backend
 pip install -r requirements.txt
 
-# 1. Build the database from Cricsheet JSON (globs recursively)
-python ingest/build_db.py --raw-dir /path/to/cricsheet/json --out data/cricket.duckdb
+# 1. Get the database: download the latest validated weekly build
+python -m ingest.pull
+#    ...or build it yourself from Cricsheet (~3 minutes, same steps as CI)
+python -m ingest.update
 
-# 2. Build the derived analytics tables (~1 minute on the full archive)
-python -m analytics.build
-
-# 3. LLM config: copy and edit (LM Studio / Ollama locally, or Groq)
+# 2. LLM config: copy and edit (LM Studio / Ollama locally, or Groq)
 cp .env.example .env
 
-# 4. Run the API
+# 3. Run the API
 uvicorn main:app --reload --port 8000
 ```
 
@@ -63,7 +70,47 @@ npm install
 npm run dev          # http://localhost:5173 (expects the API on :8000; override with VITE_API_BASE)
 ```
 
-Re-run step 2 whenever the database is re-ingested.
+Stop the API before `ingest.pull` or `ingest.update`: they swap the database
+file in place (the previous one is kept as `data/cricket.duckdb.bak`).
+`python -m ingest.pull --check` says whether a newer build is out; the app
+footer shows which build you're running.
+
+## The data pipeline
+
+```text
+Cricsheet all_json.zip + register (people.csv, names.csv)
+  -> ingest/build_db.py        raw tables: matches, deliveries, wickets, XIs, people
+  -> python -m analytics.build derived per-innings tables and expectations
+  -> ingest/validate.py        the release gate (below)
+  -> zstd + manifest.json      published as GitHub Releases data-YYYY-MM-DD and data-latest
+  -> python -m ingest.pull     downloaded, sha256-checked, swapped in
+```
+
+`.github/workflows/data.yml` runs this on `main` every Monday at 03:00 UTC
+(and on demand from the Actions tab), keeping the last 8 dated releases.
+`.github/workflows/ci.yml` runs the tests and the frontend build on every push.
+
+The validation gate fails the release if:
+
+- a table or column is missing, or a derived table is empty;
+- any table shrank against the previous release;
+- runs in the per-innings table don't match the ball-by-ball runs exactly,
+  super-over innings leak in, or runs above expected doesn't sum to ~0;
+- a retired player's career changed. `ingest/frozen_careers.json` holds
+  totals for Tendulkar, Dravid, Kumble, Kallis, Sangakkara, Jayawardene,
+  Muralitharan, Malinga, Steyn, de Villiers, McCullum, Hafeez, Mithali Raj
+  and Charlotte Edwards, computed by SQL straight over the raw tables; the
+  derived tables must agree with that SQL too. If Cricsheet back-fills an old
+  match, review it and refresh with `python -m ingest.validate --freeze`.
+
+Manual pieces, for development:
+
+```bash
+python ingest/build_db.py --zip data/raw/all_json.zip --register-dir data/raw --out data/cricket.duckdb
+python ingest/build_db.py --zip recently_added_7_json.zip --incremental   # upsert new matches
+python -m analytics.build
+python -m ingest.validate
+```
 
 ## The views
 
@@ -103,6 +150,7 @@ plain-English definition (shown in the UI and given to the model). Highlights:
 - **Form** — rolling last-N averages/strike rates/economies with career-to-date lines.
 - Scoring profile (dot %, boundary %, balls per boundary...), reliability
   (conversion rate, 30+ rate, median, variability), role (position, entry point).
+- Fielding: catches, stumpings and run-outs, per player and as leaderboards.
 
 These adjust for match situation, not opposition or pitch quality. Cricsheet
 has no ball tracking or player attributes, so pace-vs-spin, handedness and
@@ -114,16 +162,22 @@ The model never writes cricket SQL or guesses database spellings for normal
 questions. It picks a tool and passes plain names; everything that decides
 whether a number is right is deterministic, tested code:
 
+- **Player identity** (Cricsheet register). Names aren't unique: there are
+  five different "Rashid Khan"s. Every player is identified by their register
+  id and shown by the register's unique name ("Rashid Khan (2)"), so
+  namesakes' records never merge.
 - **Name resolution** (`analytics/catalog.py`). Cricsheet stores established
-  players by initials ("RG Sharma", "SPD Smith"); the resolver matches given
-  names to initials and ranks namesakes by how much they've played. It
+  players by initials ("RG Sharma", "SPD Smith"); the register's alternate
+  names ("Rohit Sharma") resolve exactly, and otherwise the resolver matches
+  given names to initials and ranks namesakes by how much they've played. It
   merges tournament naming eras (T20 World Cup = "ICC World Twenty20" + "World
   T20" + "ICC Men's T20 World Cup"), renamed franchises and venue spellings.
   Ambiguous names come back as candidates, not silent guesses.
 - **Scoring rules** (`analytics/scope.py`, `build.py`). Dismissals are counted
   by the dismissed player (non-striker run-outs), retired hurt isn't a
-  dismissal, wides aren't balls faced, byes aren't the bowler's, and super
-  overs are excluded (as in official records).
+  dismissal, wides aren't balls faced, byes aren't the bowler's, a "4" that
+  was run isn't a boundary, and super overs are excluded (as in official
+  records).
 - **Grounded output** (`agent/graph.py`). Tool results go to the UI as tables
   straight away; charts are drawn from those tables by id; an answer quoting
   numbers with no data behind it (a lookup or the on-screen view) is sent
@@ -247,7 +301,7 @@ cancellation registry are per-process; a public deployment needs shared ones.
 
 ```bash
 cd backend
-pytest                  # ~415 tests: scoring rules, derived tables, engine, API, MCP, agent graph
+pytest                  # ~440 tests: ingest, release pipeline, scoring rules, engine, API, MCP, agent graph
 pytest -m llm           # LLM-in-the-loop eval (needs a model endpoint)
 ```
 
@@ -267,7 +321,7 @@ values computed by independent SQL, checked against the real database.
 - Matchup grid + auto-written pre-match reports
 - Venue, team and tournament dashboards; a scouting board with league-strength adjustment
 - Tool-use fine-tune of a small local model for speed
-- Re-ingest with the current `build_db.py` for exact multi-wicket balls and fielding stats
+- Cricket DIPS: which parts of a record are skill and which are luck, with a live methodology page
 - Single-installer desktop app
 
 ## Licence
@@ -279,5 +333,6 @@ use, copy, modify, distribute or host it without the copyright holder's prior
 written permission -- see [LICENSE](LICENSE).
 
 Cricket data comes from [Cricsheet](https://cricsheet.org) and remains
-subject to Cricsheet's own licence terms, which require attribution.
+under Cricsheet's ODC-By 1.0 licence, which requires attribution -- see
+[DATA_NOTICE.md](DATA_NOTICE.md).
 Third-party libraries and fonts keep their own licences.

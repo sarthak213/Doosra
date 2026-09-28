@@ -40,7 +40,6 @@ from analytics.scope import (
     CREDITED_SQL,
     FORMAT_LABEL_SQL,
     NOT_DISMISSALS_SQL,
-    NOT_SUPER_OVER_SQL,
     PHASE_SQL,
     YEAR_SQL,
     Scope,
@@ -100,7 +99,7 @@ def _highlights(columns: list[str], rows: list[list], label_col: str, kind: str)
 
 
 def _exprs() -> dict:
-    return ball_exprs(catalog.get_catalog().has_new_schema)
+    return ball_exprs(catalog.get_catalog().delivery_columns)
 
 
 _OTHER_SIDE = "(CASE WHEN d.batting_team = m.team1 THEN m.team2 ELSE m.team1 END)"
@@ -136,7 +135,7 @@ def _ball_ctes(scope: Scope, role: str, key: str = "'all'", where: str = "") -> 
         w -- one row per wicket on a scoped delivery (every wicket, when the
              database has deliveries_wickets; else the first per ball)"""
     e = _exprs()
-    clauses = scope.match_clauses() + scope.ball_clauses(role) + [NOT_SUPER_OVER_SQL]
+    clauses = scope.match_clauses() + scope.ball_clauses(role) + [e["regular"]]
     if where:
         clauses.append(where)
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
@@ -146,6 +145,7 @@ b AS MATERIALIZED (
            d.batter, d.bowler, d.non_striker, d.runs_batter, d.runs_total,
            d.is_wicket, d.wicket_kind, d.player_dismissed,
            {e['faced']} AS faced, {e['legal']} AS legal, {e['bowler_runs']} AS bowler_runs,
+           {e['four']} AS is_four, {e['six']} AS is_six,
            {_OTHER_SIDE} AS fielding_team,
            m.date, m.season, m.team1, m.team2, m.venue, m.event_name, m.match_type,
            COALESCE(CAST(({key}) AS VARCHAR), 'n/a') AS k
@@ -173,14 +173,40 @@ w AS (
 # Core aggregations (per player x key)
 # ---------------------------------------------------------------------------
 
-def _batting_innings_ctes(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
+def _raw(p) -> str:
+    """Name as written in the ball-by-ball data (a ResolvedPlayer or a str)."""
+    return getattr(p, "raw_name", None) or getattr(p, "name", None) or p
+
+
+def _people_where(players, *name_cols: str) -> str:
+    """SQL matching these people on the given ball-level name columns.
+    Names aren't unique across people (three different "Rashid Khan"s), but
+    within one match each name is one person -- so when the register
+    identifies a player, match the name only inside their own matches."""
+    parts = []
+    for p in players:
+        cond = "(" + " OR ".join(f"{c} = {lit(_raw(p))}" for c in name_cols) + ")"
+        pid = getattr(p, "player_id", None)
+        if pid:
+            cond = (f"({cond} AND d.match_id IN "
+                    f"(SELECT match_id FROM players_matches WHERE player_id = {lit(pid)}))")
+        parts.append(cond)
+    return "(" + " OR ".join(parts) + ")"
+
+
+def _matches_of(players) -> str:
+    """SQL restricting deliveries to matches any of these people played in."""
+    ids = [getattr(p, "player_id", None) for p in players]
+    if not all(ids):
+        return ""
+    return f"d.match_id IN (SELECT match_id FROM players_matches WHERE player_id IN {lit_list(ids)})"
+
+
+def _batting_innings_ctes(scope: Scope, key: str = "'all'", players: list | None = None) -> str:
     """CTE chain ending in `inn`: one row per player per innings (per key),
     counting non-striker appearances so a batter run out without facing
     still has an innings."""
-    where = ""
-    if players:
-        pl = lit_list(players)
-        where = f"(d.batter IN {pl} OR d.non_striker IN {pl})"
+    where = _people_where(players, "d.batter", "d.non_striker") if players else ""
     return f"""
 WITH {_ball_ctes(scope, 'batting', key, where)},
 apps AS (
@@ -191,7 +217,7 @@ apps AS (
 bat AS (
     SELECT batter AS player, match_id, innings_num, k,
            SUM(runs_batter) AS runs, SUM(CAST(faced AS INTEGER)) AS balls,
-           SUM(CAST(runs_batter = 4 AS INTEGER)) AS fours, SUM(CAST(runs_batter = 6 AS INTEGER)) AS sixes,
+           SUM(CAST(is_four AS INTEGER)) AS fours, SUM(CAST(is_six AS INTEGER)) AS sixes,
            SUM(CAST(faced AND runs_batter = 0 AS INTEGER)) AS dots
     FROM b GROUP BY batter, match_id, innings_num, k
 ),
@@ -213,8 +239,8 @@ inn AS (
 )"""
 
 
-def _batting_sql(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
-    final_where = f"WHERE player IN {lit_list(players)}" if players else ""
+def _batting_sql(scope: Scope, key: str = "'all'", players: list | None = None) -> str:
+    final_where = f"WHERE player IN {lit_list([_raw(p) for p in players])}" if players else ""
     return f"""{_batting_innings_ctes(scope, key, players)},
 agg AS (
     SELECT player, k,
@@ -241,17 +267,17 @@ FROM agg {final_where}
 """
 
 
-def _bowling_innings_ctes(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
+def _bowling_innings_ctes(scope: Scope, key: str = "'all'", players: list | None = None) -> str:
     """CTE chain ending in `inn` (one row per bowler per innings) plus `mdn`
     (maidens per bowler per key)."""
-    where = f"d.bowler IN {lit_list(players)}" if players else ""
+    where = _people_where(players, "d.bowler") if players else ""
     return f"""
 WITH {_ball_ctes(scope, 'bowling', key, where)},
 bowl AS (
     SELECT bowler AS player, match_id, innings_num, k, MIN(date) AS date, any_value(fielding_team) AS team,
            SUM(CAST(legal AS INTEGER)) AS balls, SUM(bowler_runs) AS runs,
            SUM(CAST(legal AND bowler_runs = 0 AS INTEGER)) AS dots,
-           SUM(CAST(runs_batter = 4 AS INTEGER)) AS fours, SUM(CAST(runs_batter = 6 AS INTEGER)) AS sixes
+           SUM(CAST(is_four AS INTEGER)) AS fours, SUM(CAST(is_six AS INTEGER)) AS sixes
     FROM b GROUP BY bowler, match_id, innings_num, k
 ),
 wk AS (
@@ -272,7 +298,7 @@ inn AS (
 )"""
 
 
-def _bowling_sql(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
+def _bowling_sql(scope: Scope, key: str = "'all'", players: list | None = None) -> str:
     return f"""{_bowling_innings_ctes(scope, key, players)},
 agg AS (
     SELECT player, k, mode(team) AS team,
@@ -294,10 +320,10 @@ FROM agg LEFT JOIN mdn ON mdn.player = agg.player AND mdn.k = agg.k
 """
 
 
-def _fielding_sql(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
-    final_where = f"WHERE player IN {lit_list(players)}" if players else ""
+def _fielding_sql(scope: Scope, key: str = "'all'", players: list | None = None) -> str:
+    final_where = f"WHERE player IN {lit_list([_raw(p) for p in players])}" if players else ""
     return f"""
-WITH {_ball_ctes(scope, 'bowling', key)},
+WITH {_ball_ctes(scope, 'bowling', key, _matches_of(players) if players else "")},
 f AS (
     SELECT kind, match_id, k, fielding_team AS team,
            UNNEST(CASE WHEN kind = 'caught and bowled' THEN [bowler]
@@ -366,9 +392,11 @@ def _coverage_note(first_date: str | None) -> str | None:
     return None
 
 
-def _matches_played(player: str, scope: Scope) -> int:
+def _matches_played(player, scope: Scope) -> int:
     """Matches in the playing XI (includes games where they didn't bat/bowl)."""
-    clauses = scope.match_clauses() + [f"pm.player = {lit(player)}"]
+    pid = getattr(player, "player_id", None)
+    who = f"pm.player_id = {lit(pid)}" if pid else f"pm.player = {lit(_raw(player))}"
+    clauses = scope.match_clauses() + [who]
     if scope.team:
         clauses.append(f"pm.team IN {lit_list(scope.team)}")
     if scope.opposition:
@@ -397,7 +425,7 @@ def player_stats(player: str, role: str = "batting", split_by: str | None = None
 
     sql_fn, cols = _role_sql(role)
     key = _key_expr(split_by, role)
-    rows = _query(sql_fn(scope, key, [p.name]))
+    rows = _query(sql_fn(scope, key, [p]))
 
     title = f"{role.capitalize()} — {p.name}"
     if scope.applied:
@@ -420,7 +448,7 @@ def player_stats(player: str, role: str = "batting", split_by: str | None = None
 
     r = rows[0]
     if role == "batting" and not scope.has_ball_filters:
-        r["matches"] = _matches_played(p.name, scope)
+        r["matches"] = _matches_played(p, scope)
     note = _coverage_note(r.get("first_date"))
     if note and not (scope.from_year or scope.season):
         notes.append(note)
@@ -442,10 +470,10 @@ def compare_players(players: list[str], role: str = "batting", **filters) -> dic
 
     sql_fn, cols = _role_sql(role)
     names = [p.name for p in resolved]
-    by_name = {r["player"]: r for r in _query(sql_fn(scope, "'all'", names))}
+    by_raw = {r["player"]: r for r in _query(sql_fn(scope, "'all'", resolved))}
     rows = []
-    for name in names:
-        r = by_name.get(name)
+    for p_, name in zip(resolved, names):
+        r = by_raw.get(_raw(p_))
         if r is None:
             rows.append([name] + [None] * len(cols))
             scope.notes.append(f"{name} has no {role} records with these filters.")
@@ -596,16 +624,16 @@ def top_performances(kind: str, limit: int = 10, order: str = "highest", player:
     limit = max(1, min(int(limit or 10), MAX_LIMIT))
     lowest = (order or "highest").lower().startswith("low")
     scope = build_scope(default_gender=None if player else "male", **filters)
-    pname = None
+    pname, presolved = None, None
     if player:
         p = catalog.resolve_player(player, gender=scope.gender)
-        pname = p.name
+        pname, presolved = _raw(p), p
         if p.note:
             scope.notes.insert(0, p.note)
 
     match_info = "m.date, m.venue, m.event_name, m.team1, m.team2"
     if kind == "batting_innings":
-        sql = f"""{_batting_innings_ctes(scope, "'all'", [pname] if pname else None)}
+        sql = f"""{_batting_innings_ctes(scope, "'all'", [presolved] if presolved else None)}
 SELECT inn.player, inn.runs, inn.balls, inn.fours, inn.sixes, inn.outs, inn.batting_team AS team,
        100.0 * inn.runs / NULLIF(inn.balls, 0) AS strike_rate, {match_info}
 FROM inn JOIN matches m ON inn.match_id = m.match_id
@@ -618,7 +646,7 @@ ORDER BY inn.runs {'ASC' if lowest else 'DESC'}, inn.balls ASC LIMIT {limit}
                   r["strike_rate"], r["team"], _opp(r, r["team"]), r["venue"], r["date"], r["event_name"]] for r in rows]
         title = ("Lowest" if lowest else "Highest") + " individual scores"
     elif kind == "bowling_figures":
-        sql = f"""{_bowling_innings_ctes(scope, "'all'", [pname] if pname else None)}
+        sql = f"""{_bowling_innings_ctes(scope, "'all'", [presolved] if presolved else None)}
 SELECT inn.player, inn.wkts, inn.runs, inn.balls, inn.team, {match_info}
 FROM inn JOIN matches m ON inn.match_id = m.match_id
 WHERE inn.balls > 0 {f"AND inn.player = {lit(pname)}" if pname else ""}
@@ -630,7 +658,7 @@ ORDER BY inn.wkts DESC, inn.runs ASC LIMIT {limit}
                   r["team"], _opp(r, r["team"]), r["venue"], r["date"], r["event_name"]] for r in rows]
         title = "Best bowling figures in an innings"
     else:
-        clauses = scope.match_clauses() + scope.ball_clauses("batting") + [NOT_SUPER_OVER_SQL]
+        clauses = scope.match_clauses() + scope.ball_clauses("batting") + [_exprs()["regular"]]
         where = "WHERE " + " AND ".join(clauses)
         sql = f"""
 WITH t AS (
@@ -810,9 +838,9 @@ def matchup(batter: str | None = None, bowler: str | None = None, limit: int = 1
 
     where = []
     if bat:
-        where.append(f"d.batter = {lit(bat.name)}")
+        where.append(_people_where([bat], "d.batter"))
     if bowl:
-        where.append(f"d.bowler = {lit(bowl.name)}")
+        where.append(_people_where([bowl], "d.bowler"))
     group = "batter, bowler"
     sql = f"""
 WITH {_ball_ctes(scope, 'batting', "'all'", ' AND '.join(where))},
@@ -820,7 +848,7 @@ agg AS (
     SELECT {group}, COUNT(DISTINCT match_id) AS matches,
            SUM(CAST(faced AS INTEGER)) AS balls, SUM(runs_batter) AS runs,
            SUM(CAST(faced AND runs_batter = 0 AS INTEGER)) AS dots,
-           SUM(CAST(runs_batter = 4 AS INTEGER)) AS fours, SUM(CAST(runs_batter = 6 AS INTEGER)) AS sixes
+           SUM(CAST(is_four AS INTEGER)) AS fours, SUM(CAST(is_six AS INTEGER)) AS sixes
     FROM b GROUP BY {group}
 ),
 outs AS (
