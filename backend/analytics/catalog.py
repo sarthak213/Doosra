@@ -25,7 +25,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 
-from . import tools
+from . import db
 
 
 class ResolutionError(Exception):
@@ -57,14 +57,14 @@ def norm(text: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Cache: everything is loaded once per database file. Keyed on DB_PATH so
-# tests that point tools.DB_PATH at a fixture database get a fresh catalog.
+# tests that point db.DB_PATH at a fixture database get a fresh catalog.
 # ---------------------------------------------------------------------------
 
 _catalog_cache: dict[str, "Catalog"] = {}
 
 
 def get_catalog() -> "Catalog":
-    key = str(tools.DB_PATH)
+    key = str(db.DB_PATH)
     cat = _catalog_cache.get(key)
     if cat is None:
         cat = Catalog.load()
@@ -108,12 +108,13 @@ class Catalog:
     venues: dict[str, dict]                    # raw venue -> {matches, city, base}
     has_new_schema: bool
     has_wickets_table: bool
+    has_derived_tables: bool
     date_min: str | None
     date_max: str | None
 
     @classmethod
     def load(cls) -> "Catalog":
-        con = tools._get_connection()
+        con = db.connect()
         try:
             prow = con.execute(
                 """
@@ -159,6 +160,7 @@ class Catalog:
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'deliveries_wickets'"
             ).fetchone()[0])
             dmin, dmax = con.execute("SELECT MIN(date), MAX(date) FROM matches").fetchone()
+            tables = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
         finally:
             con.close()
 
@@ -195,6 +197,7 @@ class Catalog:
         return cls(
             players=players, players_by_last_token=by_last, teams=teams, events=events, venues=venues,
             has_new_schema="extra_wides" in cols, has_wickets_table=has_wk,
+            has_derived_tables={"batting_innings", "bowling_innings", "batting_phase", "bowling_phase"} <= tables,
             date_min=dmin, date_max=dmax,
         )
 

@@ -13,6 +13,7 @@ import pytest
 
 from agent import stats as stats_mod
 from agent import tools as tools_mod
+from analytics import db
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 REAL_DB = BACKEND_DIR / "data" / "cricket.duckdb"
@@ -29,7 +30,7 @@ def schema(monkeypatch):
     """Overrides conftest's autouse (schema-parametrized) synthetic-DB
     fixture: the expected values in eval_questions.json were captured
     against the real database."""
-    monkeypatch.setattr(tools_mod, "DB_PATH", REAL_DB)
+    monkeypatch.setattr(db, "DB_PATH", REAL_DB)
     yield "real"
 
 

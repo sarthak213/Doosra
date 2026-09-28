@@ -1,46 +1,42 @@
-import { useEffect, useRef } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
 import Masthead from "./components/Masthead.jsx";
-import MessageBubble from "./components/MessageBubble.jsx";
-import AssistantTurn from "./components/AssistantTurn.jsx";
-import SuggestedQuestions from "./components/SuggestedQuestions.jsx";
-import InputBar from "./components/InputBar.jsx";
-import { useAgentQuery } from "./hooks/useAgentQuery.js";
+import CopilotDrawer from "./copilot/CopilotDrawer.jsx";
+import { CopilotProvider, useCopilot } from "./copilot/CopilotProvider.jsx";
+import AskView from "./views/AskView.jsx";
+import CompareStudio from "./views/CompareStudio.jsx";
+import Home from "./views/Home.jsx";
+import PlayerHub from "./views/PlayerHub.jsx";
+import PlayerMatrix from "./views/PlayerMatrix.jsx";
+import QueryBuilder from "./views/QueryBuilder.jsx";
 import "./App.css";
+import "./views.css";
+
+function Shell() {
+  const { open } = useCopilot();
+  return (
+    <div className={`app-shell${open ? " copilot-open" : ""}`}>
+      <Masthead />
+      <div className="app-body">
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/players" element={<PlayerHub />} />
+          <Route path="/players/:name" element={<PlayerHub />} />
+          <Route path="/compare" element={<CompareStudio />} />
+          <Route path="/query" element={<QueryBuilder />} />
+          <Route path="/matrix" element={<PlayerMatrix />} />
+          <Route path="/ask" element={<AskView />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </div>
+      <CopilotDrawer />
+    </div>
+  );
+}
 
 export default function App() {
-  const { turns, ask, cancel, clearHistory, isStreaming } = useAgentQuery();
-  const feedEndRef = useRef(null);
-
-  useEffect(() => {
-    feedEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [turns]);
-
   return (
-    <div className="app">
-      <Masthead />
-
-      <main className="feed">
-        {turns.length > 0 && (
-          <div className="feed-tools">
-            <button type="button" className="clear-history" onClick={clearHistory}>
-              Clear history
-            </button>
-          </div>
-        )}
-        {turns.length === 0 ? (
-          <SuggestedQuestions onPick={ask} />
-        ) : (
-          turns.map((turn) => (
-            <div className="turn" key={turn.id}>
-              <MessageBubble text={turn.question} />
-              <AssistantTurn turn={turn} />
-            </div>
-          ))
-        )}
-        <div ref={feedEndRef} />
-      </main>
-
-      <InputBar onAsk={ask} onCancel={cancel} disabled={isStreaming} />
-    </div>
+    <CopilotProvider>
+      <Shell />
+    </CopilotProvider>
   );
 }

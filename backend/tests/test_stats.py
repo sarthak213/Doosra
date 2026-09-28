@@ -279,10 +279,10 @@ class TestSuperOvers:
         """A limited-overs innings_num > 2 is a super over and must not count."""
         import duckdb
 
-        from agent import tools
+        from analytics import db
 
-        db = tmp_path / "so.duckdb"
-        con = duckdb.connect(str(db))
+        db_file = tmp_path / "so.duckdb"
+        con = duckdb.connect(str(db_file))
         con.execute(f"ATTACH '{fixture_db_path}' AS src (READ_ONLY)")
         for t in ("matches", "players_matches", "deliveries_wickets"):
             con.execute(f"CREATE TABLE {t} AS SELECT * FROM src.{t}")
@@ -294,5 +294,5 @@ class TestSuperOvers:
             VALUES ('match_c', 3, 'Australia', 0, 1, 'D Warner', 'J Bumrah', 'G Maxwell', 20, 0, 20, FALSE)
         """)
         con.close()
-        monkeypatch.setattr(tools, "DB_PATH", db)
+        monkeypatch.setattr(db, "DB_PATH", db_file)
         assert row(stats.player_stats("D Warner", role="batting"))["runs"] == 12

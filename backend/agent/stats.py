@@ -28,9 +28,15 @@ from __future__ import annotations
 import functools
 import math
 
-from . import catalog, tools
-from .catalog import ResolutionError
-from .scope import (
+from analytics import catalog, db, results
+from analytics.results import franchise_case as _franchise_case
+from analytics.results import num as _num
+from analytics.results import overs as _overs
+from analytics.results import result as _result
+from analytics.results import season_labels as _season_labels
+from analytics.catalog import ResolutionError
+from analytics.scope import (
+    ball_exprs,
     CREDITED_SQL,
     FORMAT_LABEL_SQL,
     NOT_DISMISSALS_SQL,
@@ -67,7 +73,7 @@ def _tool(fn):
 
 
 def _query(sql: str) -> list[dict]:
-    con = tools._get_connection()
+    con = db.connect()
     try:
         cur = con.execute(sql)
         cols = [c[0] for c in cur.description]
@@ -76,106 +82,25 @@ def _query(sql: str) -> list[dict]:
         con.close()
 
 
-def _num(v, digits=2):
-    if v is None:
-        return None
-    if isinstance(v, float):
-        if math.isnan(v) or math.isinf(v):
-            return None
-        return round(v, digits)
-    return v
-
-
-def _overs(balls) -> float:
-    """Cricket notation: 57 balls -> 9.3 overs."""
-    balls = int(balls or 0)
-    return float(f"{balls // 6}.{balls % 6}")
-
-
-def _result(title: str, columns: list[str], rows: list[list], scope: Scope | None = None,
-            notes: list[str] | None = None, **extra) -> dict:
-    out = {"title": title, "columns": columns, "rows": [[_num(v) for v in r] for r in rows]}
-    if scope is not None and scope.applied:
-        out["filters"] = scope.describe()
-    all_notes = (scope.notes if scope is not None else []) + (notes or [])
-    if all_notes:
-        out["notes"] = all_notes
-    if not rows:
-        out["empty"] = True
-    out.update(extra)
-    return out
-
-
-# Metrics worth calling out in a split/comparison, and which direction is
-# "best". Rates only count rows with a meaningful sample.
+# Metrics worth calling out in a split/comparison, and which direction is best.
 _HIGHLIGHT_METRICS = {
     "batting": [("runs", "max"), ("average", "max"), ("strike_rate", "max"), ("highest", "max"), ("sixes", "max")],
     "bowling": [("wickets", "max"), ("economy", "min"), ("average", "min"), ("strike_rate", "min")],
     "fielding": [("catches", "max"), ("dismissals", "max")],
-    "team": [("won", "max"), ("win_pct", "max"), ("win_pct", "min")],
+    "team": [("won", "max"), ("win_pct", "max"), ("win_pct", "min", "worst_win_pct")],
 }
 
 
 def _highlights(columns: list[str], rows: list[list], label_col: str, kind: str) -> dict:
-    """Best/worst row per key metric, computed here so the model quotes them
-    instead of scanning a wide table (where small models misread values)."""
-    if len(rows) < 2:
-        return {}
-    idx = {c: i for i, c in enumerate(columns)}
-    sample_col = "balls" if "balls" in idx else "matches" if "matches" in idx else None
-    out = {}
-    for metric, direction in _HIGHLIGHT_METRICS[kind]:
-        if metric not in idx:
-            continue
-        cand = []
-        for r in rows:
-            v = r[idx[metric]]
-            if metric == "highest" and isinstance(v, str):
-                v = int(v.rstrip("*")) if v.rstrip("*").isdigit() else None
-            if not isinstance(v, (int, float)):
-                continue
-            if metric in _RATE_METRICS | {"average", "strike_rate"} and sample_col:
-                sizes = sorted(x[idx[sample_col]] or 0 for x in rows)
-                if (r[idx[sample_col]] or 0) < 0.25 * sizes[len(sizes) // 2]:
-                    continue  # tiny sample -- a 3-ball cameo shouldn't "lead"
-            cand.append((v, r))
-        if not cand:
-            continue
-        v, r = (max if direction == "max" else min)(cand, key=lambda t: t[0])
-        key = ("best" if direction == "max" else "lowest") if metric != "economy" else "best"
-        if kind == "team" and metric == "win_pct":
-            key = "best" if direction == "max" else "worst"
-        shown = _num(r[idx[metric]])
-        out[f"{key}_{metric}"] = f"{shown} ({r[idx[label_col]]})"
-    total_cols = [c for c in ("runs", "wickets", "won", "matches") if c in idx]
-    if total_cols and label_col != "player":
-        out["totals"] = {c: sum((r[idx[c]] or 0) for r in rows) for c in total_cols}
-    return out
+    return results.highlights(columns, rows, label_col, _HIGHLIGHT_METRICS[kind],
+                              rate_metrics=_RATE_METRICS | {"average", "strike_rate"},
+                              totals=("runs", "wickets", "won", "matches") if label_col != "player" else ())
+
+
 
 
 def _exprs() -> dict:
-    cat = catalog.get_catalog()
-    if cat.has_new_schema:
-        return {
-            "faced": "(d.extra_wides IS NULL)",
-            "legal": "(d.extra_wides IS NULL AND d.extra_noballs IS NULL)",
-            # extra_* columns come out of the pandas ingest as DOUBLE; keep runs integral.
-            "bowler_runs": "CAST(d.runs_total - COALESCE(d.extra_byes, 0) - COALESCE(d.extra_legbyes, 0) "
-                           "- COALESCE(d.extra_penalty, 0) AS BIGINT)",
-        }
-    return {
-        "faced": "(d.extra_type IS NULL OR d.extra_type <> 'wides')",
-        "legal": "(d.extra_type IS NULL OR d.extra_type NOT IN ('wides', 'noballs'))",
-        "bowler_runs": "(d.runs_total - CASE WHEN d.extra_type IN ('byes', 'legbyes', 'penalty') THEN d.runs_extras ELSE 0 END)",
-    }
-
-
-def _franchise_case(expr: str) -> str:
-    """Merge renamed franchises into one label when grouping by team."""
-    parts = []
-    for group in catalog.FRANCHISE_GROUPS:
-        parts.append(f"WHEN {expr} IN {lit_list(group)} THEN {lit(' / '.join(group))}")
-    return f"(CASE {' '.join(parts)} ELSE {expr} END)"
+    return ball_exprs(catalog.get_catalog().has_new_schema)
 
 
 _OTHER_SIDE = "(CASE WHEN d.batting_team = m.team1 THEN m.team2 ELSE m.team1 END)"
@@ -419,19 +344,6 @@ def _row_values(r: dict, cols: list[str]) -> list:
         else:
             out.append(r.get(c))
     return out
-
-
-def _season_labels(rows: list[dict]) -> list[str]:
-    """IPL 2008 is stored as season '2007/08'; show the calendar year when
-    every match in a season fell in one year -- unless two seasons would then
-    share a label (e.g. a '2023/24' and a '2024/25' both played in 2024)."""
-    labels = []
-    for r in rows:
-        first, last = (r.get("first_date") or "")[:4], (r.get("last_date") or "")[:4]
-        labels.append(first if first and first == last else r["k"])
-    if len(set(labels)) < len(labels):
-        return [r["k"] for r in rows]
-    return labels
 
 
 def _order_split_rows(rows: list[dict], split_by: str, role: str) -> list[dict]:

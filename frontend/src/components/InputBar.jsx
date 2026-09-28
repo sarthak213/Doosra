@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
-export default function InputBar({ onAsk, onCancel, disabled }) {
+export default function InputBar({ onAsk, onCancel, disabled, placeholder }) {
   const [value, setValue] = useState("");
   const [suggestions, setSuggestions] = useState([]);
   const debounceRef = useRef(null);
@@ -55,7 +55,7 @@ export default function InputBar({ onAsk, onCancel, disabled }) {
           type="text"
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder="Ask about any match, player, or number since 2002..."
+          placeholder={placeholder || "Ask about any player, team, ground or number since 2001…"}
           disabled={disabled}
           aria-label="Ask a cricket question"
           autoComplete="off"

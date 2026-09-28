@@ -1,11 +1,20 @@
 import { useEffect, useState } from "react";
-
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+import { Link, NavLink } from "react-router-dom";
+import { API_BASE } from "../api.js";
+import Wordmark from "./Wordmark.jsx";
 
 function formatCount(n) {
   if (n == null) return "—";
   return n.toLocaleString("en-US");
 }
+
+const NAV = [
+  ["/players", "Players"],
+  ["/compare", "Compare"],
+  ["/query", "Query"],
+  ["/matrix", "Matrix"],
+  ["/ask", "Ask"],
+];
 
 export default function Masthead() {
   const [stats, setStats] = useState(null);
@@ -19,10 +28,17 @@ export default function Masthead() {
 
   return (
     <header className="masthead">
-      <div className="masthead-title">
-        <span className="masthead-mark">Doosra</span>
-        <span className="masthead-sub">a cricket analytics agent</span>
-      </div>
+      <Link to="/" className="masthead-title">
+        <Wordmark />
+        <span className="masthead-sub">cricket analytics</span>
+      </Link>
+      <nav className="masthead-nav" aria-label="Main">
+        {NAV.map(([to, label]) => (
+          <NavLink key={to} to={to} className={({ isActive }) => (isActive ? "active" : undefined)}>
+            {label}
+          </NavLink>
+        ))}
+      </nav>
       <dl className="masthead-ticker">
         <div className="ticker-item">
           <dt>matches</dt>
@@ -31,10 +47,6 @@ export default function Masthead() {
         <div className="ticker-item">
           <dt>deliveries</dt>
           <dd>{formatCount(stats?.deliveries)}</dd>
-        </div>
-        <div className="ticker-item">
-          <dt>tournaments</dt>
-          <dd>{formatCount(stats?.tournaments)}</dd>
         </div>
       </dl>
     </header>

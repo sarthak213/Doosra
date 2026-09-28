@@ -10,9 +10,7 @@ graph.py ends up using.
 import re
 from pathlib import Path
 
-import duckdb
-
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cricket.duckdb"
+from analytics import catalog, db
 
 # Only these statement types are allowed. Anything else (INSERT, UPDATE,
 # DELETE, DROP, ATTACH, COPY, PRAGMA, etc.) is rejected before it ever
@@ -38,15 +36,8 @@ def _strip_string_literals(query: str) -> str:
 
 
 def _get_connection():
-    # Open read-only so even a bug elsewhere can't mutate the database, and
-    # disable external file/network access so table functions like
-    # read_csv()/read_text()/httpfs can't be used to read or exfiltrate
-    # files on the server from within a SELECT statement.
-    return duckdb.connect(
-        str(DB_PATH),
-        read_only=True,
-        config={"enable_external_access": False},
-    )
+    # Read-only, external access disabled -- see analytics/db.py.
+    return db.connect()
 
 
 def get_schema() -> str:
@@ -117,23 +108,17 @@ def search_player(name: str, limit: int = 5) -> list[str]:
     ranks namesakes by how much they've played -- see catalog.py. Used by
     the frontend's autocomplete.
     """
-    from . import catalog
-
     return [p.name for _, _, p in catalog.rank_players(name, limit=limit)]
 
 
 def warm_caches() -> None:
     """Load the name catalog eagerly (called on FastAPI startup) so the
     first user-facing query isn't slowed by a cold cache."""
-    from . import catalog
-
     catalog.get_catalog()
 
 
 def invalidate_caches() -> None:
     """Call after re-ingesting the DB so the next lookup picks up fresh names."""
-    from . import catalog
-
     catalog.invalidate()
 
 

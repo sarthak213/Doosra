@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Doosra: cartoon red leather cricket ball (same drawing as src/components/CricketBall.jsx) -->
+  <defs>
+    <radialGradient id="body" cx="38%" cy="32%" r="72%">
+      <stop offset="0" stop-color="#ff5c47"/>
+      <stop offset="0.45" stop-color="#e0221c"/>
+      <stop offset="1" stop-color="#8f0d0b"/>
+    </radialGradient>
+    <clipPath id="clip"><circle cx="32" cy="32" r="26"/></clipPath>
+  </defs>
+  <circle cx="32" cy="32" r="26" fill="url(#body)"/>
+  <g clip-path="url(#clip)" fill="none" stroke-linecap="round">
+    <path d="M 33 3 C 48 19, 48 44, 31 62" stroke="#9e1410" stroke-width="10"/>
+    <path d="M 33 3 C 48 19, 48 44, 31 62" stroke="#5a0b08" stroke-width="1.2"/>
+    <path d="M 28.4 3 C 43.4 19, 43.4 44, 26.4 62" stroke="#4a0906" stroke-width="3.8" stroke-dasharray="2.2 2.4"/>
+    <path d="M 28.4 3 C 43.4 19, 43.4 44, 26.4 62" stroke="#f6e7c7" stroke-width="2.5" stroke-dasharray="2.2 2.4"/>
+    <path d="M 37.6 3 C 52.6 19, 52.6 44, 35.6 62" stroke="#4a0906" stroke-width="3.8" stroke-dasharray="2.2 2.4"/>
+    <path d="M 37.6 3 C 52.6 19, 52.6 44, 35.6 62" stroke="#f6e7c7" stroke-width="2.5" stroke-dasharray="2.2 2.4"/>
+    <ellipse cx="22" cy="18.5" rx="8" ry="4.6" transform="rotate(-32 22 18.5)" fill="#ffffff" fill-opacity="0.5" stroke="none"/>
+    <path d="M 12.5 30 C 13.5 24, 16 20.5, 19 18" stroke="#ffffff" stroke-opacity="0.35" stroke-width="1.6"/>
+  </g>
+  <circle cx="32" cy="32" r="26" fill="none" stroke="#2a0805" stroke-width="2.4"/>
+</svg>

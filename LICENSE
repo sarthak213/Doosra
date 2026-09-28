@@ -1,0 +1,60 @@
+# Doosra Proprietary Software License
+
+Copyright (c) 2026 sarthak213. All rights reserved.
+
+Doosra -- PROPRIETARY SOFTWARE LICENCE
+
+This repository and everything in it that was authored for the Doosra
+project -- including, without limitation, the source code, the analytics
+methods and metric definitions as implemented here, the user interface,
+the artwork (including the cricket-ball logo and favicon), and the
+documentation (the "Software") -- is the confidential and proprietary
+property of the copyright holder, sarthak213, and is protected by copyright
+law and international treaties.
+
+1. No licence granted. Except as expressly set out in section 2, no licence
+   or other right in the Software is granted to you, whether by implication,
+   estoppel or otherwise. All rights not expressly granted are reserved by
+   the copyright holder.
+
+2. Viewing. If the copyright holder has made the Software visible to you
+   (for example, in a repository you have been given access to), you may
+   view it for the sole purpose of evaluating it or providing feedback to
+   the copyright holder.
+
+3. Restrictions. Without the prior written permission of the copyright
+   holder, you may not, in whole or in part:
+   (a) use, run, deploy or host the Software, or make it available to others
+       as a service;
+   (b) copy, reproduce, modify, translate or create derivative works of the
+       Software;
+   (c) distribute, sublicense, sell, rent, lease, publish or otherwise
+       transfer the Software;
+   (d) use the Software, or any part of it, to build a competing product or
+       service, or to train or fine-tune machine-learning models; or
+   (e) remove or alter this notice or any other proprietary notice in the
+       Software.
+
+4. Permissions. Requests for permission to use the Software should be sent
+   to the copyright holder. Any permission granted must be in writing and
+   applies only to its stated scope.
+
+5. Third-party material. This licence covers only material authored for
+   the Doosra project. It does not cover, and the copyright holder claims no
+   ownership of:
+   (a) Cricket data from Cricsheet (<https://cricsheet.org>). That data, and
+       any database built from it, remains subject to Cricsheet's own
+       licence terms, including their attribution requirements.
+   (b) Third-party open-source libraries and fonts used by the Software,
+       each of which remains subject to its own licence.
+
+6. No warranty. The Software is provided "as is", without warranty of any
+   kind, express or implied, including but not limited to the warranties of
+   merchantability, fitness for a particular purpose and non-infringement.
+   In no event shall the copyright holder be liable for any claim, damages
+   or other liability arising from, out of or in connection with the
+   Software or its use.
+
+7. Termination. Any use of the Software in breach of this licence
+   automatically terminates any permission you may have had, and you must
+   then stop using and delete all copies of the Software in your possession.
