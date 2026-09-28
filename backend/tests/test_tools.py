@@ -45,23 +45,23 @@ class TestRunSqlGuard:
 
 class TestNameSearch:
     def test_search_player(self):
-        matches = tools.search_player("Kohli")
-        assert "V Kohli" in matches
+        assert tools.search_player("Kohli")[0] == "V Kohli"
+
+    def test_search_player_expands_first_name_to_initial(self):
+        assert tools.search_player("Virat Kohli")[0] == "V Kohli"
 
     def test_search_player_no_match(self):
         assert tools.search_player("Zlatan Ibrahimovic") == []
 
-    def test_search_tournament(self):
-        matches = tools.search_tournament("Test Bash League")
-        assert "Test Bash League" in matches
-
 
 class TestSchemaAndStats:
-    def test_get_schema_lists_actual_tables(self):
-        schema = tools.get_schema()
-        # Tables are listed dynamically, so the fixture DB's tables all show up.
-        for t in ("matches", "deliveries", "players_matches", "deliveries_wickets"):
-            assert f"{t}: " in schema
+    def test_get_schema_lists_actual_tables(self, schema):
+        text = tools.get_schema()
+        expected = ["matches", "deliveries", "players_matches"]
+        if schema == "new":
+            expected.append("deliveries_wickets")
+        for t in expected:
+            assert f"{t}: " in text
 
     def test_get_stats(self):
         s = tools.get_stats()
@@ -75,16 +75,7 @@ class TestToolRegistration:
         # prompt but forgetting to register its implementation (or the
         # reverse -- an impl with no schema the model can never call).
         schema_names = {t["function"]["name"] for t in graph.TOOL_SCHEMAS}
-        impl_names = set(graph.TOOL_IMPLS)
-        assert schema_names == impl_names
+        assert schema_names == set(graph.TOOL_IMPLS)
 
-    def test_new_stats_tools_registered(self):
-        for name in (
-            "get_fielding_stats",
-            "get_head_to_head",
-            "get_venue_stats",
-            "get_season_trend",
-            "get_matchup",
-        ):
-            assert name in graph.TOOL_IMPLS
-            assert name in {t["function"]["name"] for t in graph.TOOL_SCHEMAS}
+    def test_final_answer_is_offered(self):
+        assert "final_answer" in {t["function"]["name"] for t in graph.ALL_TOOLS}

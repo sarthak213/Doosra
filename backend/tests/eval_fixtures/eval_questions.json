@@ -1,5 +1,5 @@
 {
-  "description": "Evaluation questions for the cricket agent. Questions with a 'check' block are verified deterministically against the real database by tests/test_eval_stats.py (no LLM involved); their expected values were computed with direct SQL, independent of the stats code under test. Questions without a 'check' are exercised only by the LLM-in-the-loop eval (tests/test_llm_eval.py, run explicitly: pytest -m llm). Values were captured against data/cricket.duckdb as ingested at the time the file was created -- re-ingesting with newer raw data will shift them, and that is exactly the signal the eval is meant to give.",
+  "description": "Evaluation questions for the cricket agent. Questions with a 'check' block are verified deterministically against the real database by tests/test_eval_stats.py (no LLM involved); their expected values were computed with direct SQL, independent of the stats code under test. Questions without a 'check' are exercised only by the LLM-in-the-loop eval (tests/test_llm_eval.py, run explicitly: pytest -m llm). Values were recomputed (super overs excluded; 'retired hurt'/'retired not out' are not dismissals) and captured against data/cricket.duckdb as ingested at the time the file was created -- re-ingesting with newer raw data will shift them, and that is exactly the signal the eval is meant to give.",
   "questions": [
     {
       "id": "q01",
@@ -7,9 +7,15 @@
       "expected_answer": "22,983 matches.",
       "check": {
         "tool": "run_sql",
-        "args": { "query": "SELECT COUNT(*) AS n FROM matches" },
+        "args": {
+          "query": "SELECT COUNT(*) AS n FROM matches"
+        },
         "field": "rows",
-        "equals": [[22983]]
+        "equals": [
+          [
+            22983
+          ]
+        ]
       }
     },
     {
@@ -18,9 +24,15 @@
       "expected_answer": "11,615,100 deliveries.",
       "check": {
         "tool": "run_sql",
-        "args": { "query": "SELECT COUNT(*) AS n FROM deliveries" },
+        "args": {
+          "query": "SELECT COUNT(*) AS n FROM deliveries"
+        },
         "field": "rows",
-        "equals": [[11615100]]
+        "equals": [
+          [
+            11615100
+          ]
+        ]
       }
     },
     {
@@ -29,9 +41,15 @@
       "expected_answer": "1,107 distinct events.",
       "check": {
         "tool": "run_sql",
-        "args": { "query": "SELECT COUNT(DISTINCT event_name) AS n FROM matches WHERE event_name IS NOT NULL" },
+        "args": {
+          "query": "SELECT COUNT(DISTINCT event_name) AS n FROM matches WHERE event_name IS NOT NULL"
+        },
         "field": "rows",
-        "equals": [[1107]]
+        "equals": [
+          [
+            1107
+          ]
+        ]
       }
     },
     {
@@ -40,31 +58,45 @@
       "expected_answer": "23,000 run-outs.",
       "check": {
         "tool": "run_sql",
-        "args": { "query": "SELECT COUNT(*) AS n FROM deliveries WHERE wicket_kind = 'run out'" },
+        "args": {
+          "query": "SELECT COUNT(*) AS n FROM deliveries WHERE wicket_kind = 'run out'"
+        },
         "field": "rows",
-        "equals": [[23000]]
+        "equals": [
+          [
+            23000
+          ]
+        ]
       }
     },
     {
       "id": "q05",
       "question": "How many runs has Virat Kohli scored in men's cricket?",
-      "expected_answer": "37,364 runs.",
+      "expected_answer": "37,348 runs.",
       "check": {
-        "tool": "get_batting_stats",
-        "args": { "player": "V Kohli", "gender": "male" },
+        "tool": "player_stats",
+        "args": {
+          "player": "Virat Kohli",
+          "role": "batting",
+          "gender": "male"
+        },
         "field": "runs",
-        "equals": 37364
+        "equals": 37348
       }
     },
     {
       "id": "q06",
       "question": "How many balls has Virat Kohli faced in men's cricket?",
-      "expected_answer": "42,239 balls.",
+      "expected_answer": "42,233 balls.",
       "check": {
-        "tool": "get_batting_stats",
-        "args": { "player": "V Kohli", "gender": "male" },
-        "field": "balls_faced",
-        "equals": 42239
+        "tool": "player_stats",
+        "args": {
+          "player": "Virat Kohli",
+          "role": "batting",
+          "gender": "male"
+        },
+        "field": "balls",
+        "equals": 42233
       }
     },
     {
@@ -72,8 +104,12 @@
       "question": "How many times has Virat Kohli been dismissed in men's cricket?",
       "expected_answer": "764 dismissals.",
       "check": {
-        "tool": "get_batting_stats",
-        "args": { "player": "V Kohli", "gender": "male" },
+        "tool": "player_stats",
+        "args": {
+          "player": "Virat Kohli",
+          "role": "batting",
+          "gender": "male"
+        },
         "field": "dismissals",
         "equals": 764
       }
@@ -83,8 +119,12 @@
       "question": "How many sixes has Virat Kohli hit in men's cricket?",
       "expected_answer": "635 sixes.",
       "check": {
-        "tool": "get_batting_stats",
-        "args": { "player": "V Kohli", "gender": "male" },
+        "tool": "player_stats",
+        "args": {
+          "player": "Virat Kohli",
+          "role": "batting",
+          "gender": "male"
+        },
         "field": "sixes",
         "equals": 635
       }
@@ -92,45 +132,61 @@
     {
       "id": "q09",
       "question": "How many fours has Virat Kohli hit in men's cricket?",
-      "expected_answer": "3,603 fours.",
+      "expected_answer": "3,600 fours.",
       "check": {
-        "tool": "get_batting_stats",
-        "args": { "player": "V Kohli", "gender": "male" },
+        "tool": "player_stats",
+        "args": {
+          "player": "Virat Kohli",
+          "role": "batting",
+          "gender": "male"
+        },
         "field": "fours",
-        "equals": 3603
+        "equals": 3600
       }
     },
     {
       "id": "q10",
-      "question": "In how many matches has Virat Kohli batted in men's cricket?",
-      "expected_answer": "807 matches.",
+      "question": "In how many men's matches has Virat Kohli played?",
+      "expected_answer": "834 matches.",
       "check": {
-        "tool": "get_batting_stats",
-        "args": { "player": "V Kohli", "gender": "male" },
+        "tool": "player_stats",
+        "args": {
+          "player": "Virat Kohli",
+          "role": "batting",
+          "gender": "male"
+        },
         "field": "matches",
-        "equals": 807
+        "equals": 834
       }
     },
     {
       "id": "q11",
       "question": "How many wickets did Lasith Malinga take in men's cricket?",
-      "expected_answer": "695 wickets (credited to the bowler; run-outs excluded).",
+      "expected_answer": "694 wickets (credited to the bowler; run-outs excluded).",
       "check": {
-        "tool": "get_bowling_stats",
-        "args": { "player": "SL Malinga", "gender": "male" },
+        "tool": "player_stats",
+        "args": {
+          "player": "Lasith Malinga",
+          "role": "bowling",
+          "gender": "male"
+        },
         "field": "wickets",
-        "equals": 695
+        "equals": 694
       }
     },
     {
       "id": "q12",
       "question": "How many legal deliveries did Lasith Malinga bowl in men's cricket?",
-      "expected_answer": "19,295 balls.",
+      "expected_answer": "19,283 balls.",
       "check": {
-        "tool": "get_bowling_stats",
-        "args": { "player": "SL Malinga", "gender": "male" },
-        "field": "balls_bowled",
-        "equals": 19295
+        "tool": "player_stats",
+        "args": {
+          "player": "Lasith Malinga",
+          "role": "bowling",
+          "gender": "male"
+        },
+        "field": "balls",
+        "equals": 19283
       }
     },
     {
@@ -138,8 +194,12 @@
       "question": "How many runs did Sachin Tendulkar score in men's cricket?",
       "expected_answer": "15,193 runs.",
       "check": {
-        "tool": "get_batting_stats",
-        "args": { "player": "SR Tendulkar", "gender": "male" },
+        "tool": "player_stats",
+        "args": {
+          "player": "Sachin Tendulkar",
+          "role": "batting",
+          "gender": "male"
+        },
         "field": "runs",
         "equals": 15193
       }
@@ -147,25 +207,32 @@
     {
       "id": "q14",
       "question": "How many runs has David Warner scored in men's cricket?",
-      "expected_answer": "28,573 runs.",
+      "expected_answer": "28,566 runs.",
       "check": {
-        "tool": "get_batting_stats",
-        "args": { "player": "DA Warner", "gender": "male" },
+        "tool": "player_stats",
+        "args": {
+          "player": "David Warner",
+          "role": "batting",
+          "gender": "male"
+        },
         "field": "runs",
-        "equals": 28573
+        "equals": 28566
       }
     },
     {
       "id": "q15",
-      "question": "What is the head-to-head record between India and Australia?",
-      "expected_answer": "228 matches: India 88 wins, Australia 114 wins, 26 draws/no-results.",
+      "question": "What is the head-to-head record between India and Australia in men's cricket?",
+      "expected_answer": "171 matches: India 75 wins, Australia 73 wins, 23 draws/ties/no-results.",
       "check": {
-        "tool": "get_head_to_head",
-        "args": { "team1": "India", "team2": "Australia" },
+        "tool": "team_stats",
+        "args": {
+          "team": "India",
+          "opposition": "Australia"
+        },
         "fields": {
-          "played": 228,
-          "team1_wins": 88,
-          "team2_wins": 114
+          "matches": 171,
+          "won": 75,
+          "lost": 73
         }
       }
     },
@@ -174,10 +241,16 @@
       "question": "How many matches have been played at the Dubai International Cricket Stadium?",
       "expected_answer": "388 matches.",
       "check": {
-        "tool": "get_venue_stats",
-        "args": { "venue": "Dubai International Cricket Stadium" },
-        "field": "matches_played",
-        "equals": 388
+        "tool": "run_sql",
+        "args": {
+          "query": "SELECT COUNT(*) AS n FROM matches WHERE venue LIKE 'Dubai International Cricket Stadium%'"
+        },
+        "field": "rows",
+        "equals": [
+          [
+            388
+          ]
+        ]
       }
     },
     {
@@ -185,21 +258,29 @@
       "question": "What is the highest innings total at the Dubai International Cricket Stadium?",
       "expected_answer": "579.",
       "check": {
-        "tool": "get_venue_stats",
-        "args": { "venue": "Dubai International Cricket Stadium" },
-        "field": "highest_total.runs",
-        "equals": 579
+        "tool": "top_performances",
+        "args": {
+          "kind": "team_total",
+          "venue": "Dubai International Cricket Stadium",
+          "gender": "all",
+          "limit": 1
+        },
+        "field": "total",
+        "equals": "579/3"
       }
     },
     {
       "id": "q18",
-      "question": "What is the average first-innings total at the Dubai International Cricket Stadium?",
-      "expected_answer": "About 168.2 runs.",
+      "question": "What is the average first-innings total in men's T20Is at the Dubai International Cricket Stadium?",
+      "expected_answer": "About 146.4 runs.",
       "check": {
-        "tool": "get_venue_stats",
-        "args": { "venue": "Dubai International Cricket Stadium" },
-        "field": "average_first_innings_total",
-        "equals": 168.2
+        "tool": "venue_stats",
+        "args": {
+          "venue": "Dubai International Cricket Stadium",
+          "format": "T20I"
+        },
+        "field": "avg_first_innings",
+        "equals": 146.4
       }
     },
     {
@@ -208,9 +289,15 @@
       "expected_answer": "1,243 matches.",
       "check": {
         "tool": "run_sql",
-        "args": { "query": "SELECT COUNT(*) AS n FROM matches WHERE event_name = 'Indian Premier League'" },
+        "args": {
+          "query": "SELECT COUNT(*) AS n FROM matches WHERE event_name = 'Indian Premier League'"
+        },
         "field": "rows",
-        "equals": [[1243]]
+        "equals": [
+          [
+            1243
+          ]
+        ]
       }
     },
     {
@@ -219,9 +306,15 @@
       "expected_answer": "4,667 matches.",
       "check": {
         "tool": "run_sql",
-        "args": { "query": "SELECT COUNT(*) AS n FROM matches WHERE gender = 'female'" },
+        "args": {
+          "query": "SELECT COUNT(*) AS n FROM matches WHERE gender = 'female'"
+        },
         "field": "rows",
-        "equals": [[4667]]
+        "equals": [
+          [
+            4667
+          ]
+        ]
       }
     },
     {
@@ -237,7 +330,7 @@
     {
       "id": "q23",
       "question": "Who has taken the most wickets in men's T20 internationals?",
-      "expected_answer": "A specific bowler named with a wicket count for match_type IT20, gender male."
+      "expected_answer": "A specific bowler named with a wicket count for official men's T20Is (match_type T20, team_type international)."
     },
     {
       "id": "q24",
@@ -305,6 +398,71 @@
       "expected_answer": "A specific fielder named with a catch count.",
       "requires_new_schema": true,
       "note": "Needs deliveries_wickets (post-reingest schema); skipped while the database predates it."
+    },
+    {
+      "id": "q37",
+      "question": "What is Rohit Sharma's strike rate in the IPL?",
+      "expected_answer": "A strike rate of 132.92 for RG Sharma.",
+      "check": {
+        "tool": "player_stats",
+        "args": {
+          "player": "Rohit Sharma",
+          "role": "batting",
+          "competition": "IPL"
+        },
+        "field": "strike_rate",
+        "equals": 132.92
+      }
+    },
+    {
+      "id": "q38",
+      "question": "Who has taken the most wickets in men's T20 World Cups?",
+      "expected_answer": "Shakib Al Hasan with 47 wickets.",
+      "check": {
+        "tool": "leaderboard",
+        "args": {
+          "role": "bowling",
+          "metric": "wickets",
+          "competition": "T20 World Cup"
+        },
+        "fields": {
+          "player": "Shakib Al Hasan",
+          "wickets": 47
+        }
+      }
+    },
+    {
+      "id": "q39",
+      "question": "Which team has won the most men's matches at Eden Gardens?",
+      "expected_answer": "Kolkata Knight Riders with 57 wins.",
+      "check": {
+        "tool": "leaderboard",
+        "args": {
+          "role": "team",
+          "metric": "wins",
+          "venue": "Eden Gardens"
+        },
+        "fields": {
+          "team": "Kolkata Knight Riders",
+          "wins": 57
+        }
+      }
+    },
+    {
+      "id": "q40",
+      "question": "How many runs has Virat Kohli scored in T20Is against Pakistan?",
+      "expected_answer": "492 runs.",
+      "check": {
+        "tool": "player_stats",
+        "args": {
+          "player": "Virat Kohli",
+          "role": "batting",
+          "format": "T20I",
+          "opposition": "Pakistan"
+        },
+        "field": "runs",
+        "equals": 492
+      }
     }
   ]
 }

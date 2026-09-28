@@ -38,14 +38,12 @@ QUESTIONS = json.loads(EVAL_FILE.read_text(encoding="utf-8"))["questions"]
 
 
 @pytest.fixture(autouse=True)
-def use_real_db(monkeypatch):
-    """Overrides conftest's autouse synthetic-DB fixture: the eval runs
-    against the real database the questions' expected answers assume."""
+def schema(monkeypatch):
+    """Overrides conftest's autouse (schema-parametrized) synthetic-DB
+    fixture: the eval runs against the real database the questions'
+    expected answers assume."""
     monkeypatch.setattr(tools_mod, "DB_PATH", REAL_DB)
-    monkeypatch.setattr(tools_mod, "_player_names_cache", None)
-    monkeypatch.setattr(tools_mod, "_tournament_names_cache", None)
-    monkeypatch.setattr(stats_mod, "_delivery_columns_cache", None)
-    yield
+    yield "real"
 
 
 def _has_wickets_table():

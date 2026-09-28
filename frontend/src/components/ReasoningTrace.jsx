@@ -8,8 +8,17 @@ function formatToolInput(input) {
 }
 
 function formatToolOutput(output) {
-  if (output && typeof output === "object") {
+  if (output && typeof output === "object" && !Array.isArray(output)) {
     if (output.error) return `error: ${output.error}`;
+    if (output.status) return output.status;
+    // Stats tools: {table_id, title, rows: [{col: value}, ...], notes}
+    if (Array.isArray(output.rows) && !Array.isArray(output.columns)) {
+      const lines = [output.title || "result"];
+      if (output.empty) lines.push("(no rows)");
+      else lines.push(`${output.rows.length} row(s)${output.table_id ? ` → table ${output.table_id}` : ""}`);
+      (output.notes || []).forEach((n) => lines.push(`· ${n}`));
+      return lines.join("\n");
+    }
     if (Array.isArray(output.rows) && Array.isArray(output.columns)) {
       const header = output.columns.join(" | ");
       const rows = output.rows
@@ -23,6 +32,7 @@ function formatToolOutput(output) {
   if (Array.isArray(output)) {
     return output.length ? output.join(", ") : "(no matches)";
   }
+  if (output && typeof output === "object") return JSON.stringify(output, null, 2);
   return String(output);
 }
 

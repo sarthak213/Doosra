@@ -30,7 +30,7 @@ from agent.graph import run_agent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    tools.warm_name_caches()
+    tools.warm_caches()
     yield
 
 

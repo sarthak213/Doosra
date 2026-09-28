@@ -1,715 +1,968 @@
 """
-Higher-level cricket statistics tools.
+The analytics engine behind the agent's tools.
 
-These exist because letting the LLM reconstruct correct SQL for things like
-"batting average" from scratch, every time, is how we got a real bug: an
-earlier query counted dismissals by grouping on `batter` and checking
-`is_wicket`, which silently miscounts run-outs (a run-out can dismiss the
-*non-striker*, not the batter facing that ball). These functions encode the
-correct formula once, tested, so the agent calls a tool instead of
-re-deriving cricket scoring rules under time pressure.
+Why this exists: letting an LLM derive cricket scoring rules in raw SQL on
+every question is how the app produced wrong numbers (dismissals counted via
+the facing batter miss non-striker run-outs; "retired hurt" isn't a
+dismissal; byes aren't the bowler's fault; a wide isn't a ball faced...).
+Every rule is encoded once here, in shared SQL building blocks, and every
+tool -- single-player figures, comparisons, splits, leaderboards, records --
+is assembled from the same blocks, so they can't disagree with each other.
 
-All player/tournament arguments are expected to already be resolved to their
-exact database strings (via search_player / search_tournament) -- these
-functions don't do fuzzy matching themselves.
+Each public function:
+  * takes plain human names (player="Rohit Sharma", competition="IPL") and
+    resolves them via catalog/scope -- no exact-string lookups for the LLM;
+  * returns a uniform envelope {title, columns, rows, filters, notes} that
+    the agent loop can show to the user as a table and to the model as
+    records;
+  * returns {"error": ..., "candidates": [...]} instead of raising when a
+    name is ambiguous or unknown, so the model can recover.
+
+Works against both database schemas: the current one (per-type extras +
+deliveries_wickets, exact) and the older one (single extra_type string,
+first wicket per ball only), probing which one is present.
 """
 
-from .tools import _get_connection, run_sql  # noqa: F401 (run_sql re-exported for convenience)
+from __future__ import annotations
 
-# Dismissal kinds actually credited to the bowler. Everything else (run out,
-# retired hurt/out/not out, obstructing the field, handled the ball, hit the
-# ball twice) is excluded from bowling wickets.
-_BOWLER_CREDITED_KINDS = ("bowled", "caught", "caught and bowled", "lbw", "stumped", "hit wicket")
-_credited_sql = ", ".join(f"'{k}'" for k in _BOWLER_CREDITED_KINDS)
+import functools
+import math
 
-# The deliveries schema changed after the first release: per-type extra
-# amount columns (extra_wides/noballs/byes/legbyes/penalty) and the
-# deliveries_wickets table were added so a ball with multiple extra types
-# (e.g. a no-ball that also runs byes) or multiple wickets isn't
-# undercounted. Databases built before that change lack them, so probe the
-# actual columns once per process and fall back to the older approximation
-# (via the single extra_type string) against a not-yet-re-ingested database.
-_delivery_columns_cache: set[str] | None = None
+from . import catalog, tools
+from .catalog import ResolutionError
+from .scope import (
+    CREDITED_SQL,
+    FORMAT_LABEL_SQL,
+    NOT_DISMISSALS_SQL,
+    NOT_SUPER_OVER_SQL,
+    PHASE_SQL,
+    YEAR_SQL,
+    Scope,
+    build_scope,
+    lit,
+    lit_list,
+)
+
+MAX_LIMIT = 50
 
 
-def _deliveries_columns() -> set[str]:
-    global _delivery_columns_cache
-    if _delivery_columns_cache is None:
-        con = _get_connection()
+# ---------------------------------------------------------------------------
+# Plumbing
+# ---------------------------------------------------------------------------
+
+def _tool(fn):
+    """Turn resolution/validation failures into {"error": ...} results the
+    model can read and act on, instead of exceptions."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
         try:
-            _delivery_columns_cache = {row[0] for row in con.execute("DESCRIBE deliveries").fetchall()}
-        finally:
-            con.close()
-    return _delivery_columns_cache
+            return fn(*args, **kwargs)
+        except ResolutionError as e:
+            return e.to_dict()
+        except ValueError as e:
+            return {"error": str(e)}
+
+    return wrapper
 
 
-def _has_wickets_table() -> bool:
-    con = _get_connection()
+def _query(sql: str) -> list[dict]:
+    con = tools._get_connection()
     try:
-        rows = con.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'deliveries_wickets'"
-        ).fetchone()
-        return bool(rows[0])
+        cur = con.execute(sql)
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
     finally:
         con.close()
 
 
-def invalidate_schema_caches() -> None:
-    """Call after re-ingesting the DB so column probes re-run."""
-    global _delivery_columns_cache
-    _delivery_columns_cache = None
+def _num(v, digits=2):
+    if v is None:
+        return None
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return round(v, digits)
+    return v
 
 
-def _filters_sql(
-    tournament: str | None,
-    match_type: str | None,
-    gender: str | None = None,
-    min_over: int | None = None,
-    max_over: int | None = None,
-    delivery_alias: str = "d",
-):
-    """Builds a WHERE clause fragment + params for the optional filters shared
-    by the stat functions. `delivery_alias` names the deliveries-like table
-    the over filters apply to ("d", or "dw" when filtering deliveries_wickets
-    directly). Returns (sql_fragment, params)."""
-    clauses = []
-    params = []
-    if tournament:
-        clauses.append("m.event_name = ?")
-        params.append(tournament)
-    if match_type:
-        clauses.append("m.match_type = ?")
-        params.append(match_type)
-    if gender:
-        clauses.append("m.gender = ?")
-        params.append(gender)
-    if min_over is not None:
-        clauses.append(f"{delivery_alias}.over_num >= ?")
-        params.append(min_over)
-    if max_over is not None:
-        clauses.append(f"{delivery_alias}.over_num <= ?")
-        params.append(max_over)
-    sql = (" AND " + " AND ".join(clauses)) if clauses else ""
-    return sql, params
+def _overs(balls) -> float:
+    """Cricket notation: 57 balls -> 9.3 overs."""
+    balls = int(balls or 0)
+    return float(f"{balls // 6}.{balls % 6}")
 
 
-def get_batting_stats(
-    player: str,
-    tournament: str | None = None,
-    match_type: str | None = None,
-    gender: str | None = None,
-    min_over: int | None = None,
-    max_over: int | None = None,
-) -> dict:
-    """
-    Correct batting figures for a player: runs, balls faced, dismissals,
-    average, strike rate, fours, sixes, matches played.
-
-    - Balls faced excludes wides (a batter doesn't "face" a wide) but
-      includes no-balls, matching standard cricket scoring convention.
-    - Dismissals are counted via the dismissed player, NOT via `batter` +
-      `is_wicket` -- a run-out can dismiss the non-striker, so counting by
-      the facing batter alone undercounts some players' dismissals.
-    - `average` is null when the player has never been dismissed in the
-      filtered data (undefined, not infinite).
-    - `gender` ("male"/"female") filters on matches.gender -- the database
-      mixes men's and women's cricket, so set it unless the question is
-      explicitly about both.
-    """
-    filt_sql, filt_params = _filters_sql(tournament, match_type, gender, min_over, max_over)
-    wickets_filt_sql, wickets_filt_params = _filters_sql(
-        tournament, match_type, gender, min_over, max_over, delivery_alias="dw"
-    )
-
-    # With the new per-type extra columns, "was a wide" is exactly
-    # extra_wides IS NULL; on an older schema fall back to extra_type.
-    new_schema = "extra_wides" in _deliveries_columns()
-    balls_faced_expr = "d.extra_wides IS NULL" if new_schema else "(d.extra_type IS NULL OR d.extra_type != 'wides')"
-
-    con = _get_connection()
-    try:
-        row = con.execute(
-            f"""
-            SELECT
-                SUM(CASE WHEN d.batter = ? THEN d.runs_batter ELSE 0 END) AS runs,
-                COUNT(CASE WHEN d.batter = ? AND {balls_faced_expr} THEN 1 END) AS balls_faced,
-                COUNT(CASE WHEN d.is_wicket AND d.player_dismissed = ? THEN 1 END) AS dismissals,
-                COUNT(CASE WHEN d.batter = ? AND d.runs_batter = 4 THEN 1 END) AS fours,
-                COUNT(CASE WHEN d.batter = ? AND d.runs_batter = 6 THEN 1 END) AS sixes,
-                COUNT(DISTINCT CASE WHEN d.batter = ? THEN d.match_id END) AS matches
-            FROM deliveries d
-            JOIN matches m ON d.match_id = m.match_id
-            WHERE (d.batter = ? OR d.player_dismissed = ?){filt_sql}
-            """,
-            [player, player, player, player, player, player, player, player] + filt_params,
-        ).fetchone()
-
-        # On the new schema, deliveries_wickets has every dismissal on a ball
-        # (deliveries.player_dismissed only records the first), so count
-        # dismissals there instead when it's available.
-        if _has_wickets_table():
-            dismissals = con.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM deliveries_wickets dw
-                JOIN matches m ON dw.match_id = m.match_id
-                WHERE dw.player_out = ?{wickets_filt_sql}
-                """,
-                [player] + wickets_filt_params,
-            ).fetchone()[0]
-        else:
-            dismissals = row[2]
-    finally:
-        con.close()
-
-    runs, balls_faced, _, fours, sixes, matches = row
-    runs = runs or 0
-    balls_faced = balls_faced or 0
-    dismissals = dismissals or 0
-
-    return {
-        "player": player,
-        "runs": runs,
-        "balls_faced": balls_faced,
-        "dismissals": dismissals,
-        "average": round(runs / dismissals, 2) if dismissals > 0 else None,
-        "strike_rate": round(100.0 * runs / balls_faced, 2) if balls_faced > 0 else None,
-        "fours": fours or 0,
-        "sixes": sixes or 0,
-        "matches": matches or 0,
-        "filters": {"tournament": tournament, "match_type": match_type, "gender": gender, "min_over": min_over, "max_over": max_over},
-    }
+def _result(title: str, columns: list[str], rows: list[list], scope: Scope | None = None,
+            notes: list[str] | None = None, **extra) -> dict:
+    out = {"title": title, "columns": columns, "rows": [[_num(v) for v in r] for r in rows]}
+    if scope is not None and scope.applied:
+        out["filters"] = scope.describe()
+    all_notes = (scope.notes if scope is not None else []) + (notes or [])
+    if all_notes:
+        out["notes"] = all_notes
+    if not rows:
+        out["empty"] = True
+    out.update(extra)
+    return out
 
 
-def get_bowling_stats(
-    player: str,
-    tournament: str | None = None,
-    match_type: str | None = None,
-    gender: str | None = None,
-    min_over: int | None = None,
-    max_over: int | None = None,
-) -> dict:
-    """
-    Correct bowling figures for a player: wickets, runs conceded, balls
-    bowled, economy, average, strike rate, matches played.
-
-    - Runs conceded excludes byes/leg-byes (not the bowler's fault) but
-      includes wides/no-balls (are the bowler's fault).
-    - Balls bowled excludes wides/no-balls (they're re-bowled, don't count
-      toward the over).
-    - Wickets only count dismissal kinds actually credited to the bowler
-      (bowled, caught, caught and bowled, lbw, stumped, hit wicket) --
-      run out, retired hurt/out/not out, obstructing the field, handled the
-      ball, and hit the ball twice are all excluded.
-    - `gender` ("male"/"female") filters on matches.gender -- the database
-      mixes men's and women's cricket, so set it unless the question is
-      explicitly about both.
-    """
-    filt_sql, filt_params = _filters_sql(tournament, match_type, gender, min_over, max_over)
-
-    new_schema = "extra_wides" in _deliveries_columns()
-    if new_schema:
-        # Exact even when a ball carries more than one extra type (e.g. a
-        # no-ball that also runs byes): charge the bowler everything except
-        # byes, leg-byes, and penalties (none of those debit the bowler), and
-        # a ball is legal iff it's neither a wide nor a no-ball.
-        runs_conceded_expr = (
-            "d.runs_total - COALESCE(d.extra_byes, 0) - COALESCE(d.extra_legbyes, 0) - COALESCE(d.extra_penalty, 0)"
-        )
-        balls_bowled_expr = "d.extra_wides IS NULL AND d.extra_noballs IS NULL"
-    else:
-        runs_conceded_expr = "CASE WHEN d.extra_type IN ('byes', 'legbyes') THEN d.runs_total - d.runs_extras ELSE d.runs_total END"
-        balls_bowled_expr = "d.extra_type IS NULL OR d.extra_type NOT IN ('wides', 'noballs')"
-
-    con = _get_connection()
-    try:
-        row = con.execute(
-            f"""
-            SELECT
-                SUM({runs_conceded_expr}) AS runs_conceded,
-                COUNT(CASE WHEN {balls_bowled_expr} THEN 1 END) AS balls_bowled,
-                COUNT(CASE WHEN d.is_wicket AND d.wicket_kind IN ({_credited_sql}) THEN 1 END) AS wickets,
-                COUNT(DISTINCT d.match_id) AS matches
-            FROM deliveries d
-            JOIN matches m ON d.match_id = m.match_id
-            WHERE d.bowler = ?{filt_sql}
-            """,
-            [player] + filt_params,
-        ).fetchone()
-
-        # On the new schema, count wickets from deliveries_wickets (which has
-        # every wicket on a ball -- deliveries.wicket_kind only records the
-        # first) joined back to deliveries for the bowler.
-        if _has_wickets_table():
-            wickets = con.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM deliveries_wickets dw
-                JOIN deliveries d
-                  ON dw.match_id = d.match_id AND dw.innings_num = d.innings_num
-                 AND dw.over_num = d.over_num AND dw.ball_in_over = d.ball_in_over
-                JOIN matches m ON d.match_id = m.match_id
-                WHERE d.bowler = ? AND dw.kind IN ({_credited_sql}){filt_sql}
-                """,
-                [player] + filt_params,
-            ).fetchone()[0]
-        else:
-            wickets = row[2]
-    finally:
-        con.close()
-
-    runs_conceded, balls_bowled, _, matches = row
-    runs_conceded = runs_conceded or 0
-    balls_bowled = balls_bowled or 0
-    wickets = wickets or 0
-    overs = balls_bowled / 6.0 if balls_bowled else 0
-
-    return {
-        "player": player,
-        "wickets": wickets,
-        "runs_conceded": runs_conceded,
-        "balls_bowled": balls_bowled,
-        "overs": round(overs, 1),
-        "economy": round(runs_conceded / overs, 2) if overs > 0 else None,
-        "average": round(runs_conceded / wickets, 2) if wickets > 0 else None,
-        "strike_rate": round(balls_bowled / wickets, 2) if wickets > 0 else None,
-        "matches": matches or 0,
-        "filters": {"tournament": tournament, "match_type": match_type, "gender": gender, "min_over": min_over, "max_over": max_over},
-    }
+# Metrics worth calling out in a split/comparison, and which direction is
+# "best". Rates only count rows with a meaningful sample.
+_HIGHLIGHT_METRICS = {
+    "batting": [("runs", "max"), ("average", "max"), ("strike_rate", "max"), ("highest", "max"), ("sixes", "max")],
+    "bowling": [("wickets", "max"), ("economy", "min"), ("average", "min"), ("strike_rate", "min")],
+    "fielding": [("catches", "max"), ("dismissals", "max")],
+    "team": [("won", "max"), ("win_pct", "max"), ("win_pct", "min")],
+}
 
 
-def get_fielding_stats(
-    player: str,
-    tournament: str | None = None,
-    match_type: str | None = None,
-    gender: str | None = None,
-) -> dict:
-    """
-    Fielding figures for a player: catches, stumpings, run-outs (as a fielder,
-    including keeper), matches played.
+def _highlights(columns: list[str], rows: list[list], label_col: str, kind: str) -> dict:
+    """Best/worst row per key metric, computed here so the model quotes them
+    instead of scanning a wide table (where small models misread values)."""
+    if len(rows) < 2:
+        return {}
+    idx = {c: i for i, c in enumerate(columns)}
+    sample_col = "balls" if "balls" in idx else "matches" if "matches" in idx else None
+    out = {}
+    for metric, direction in _HIGHLIGHT_METRICS[kind]:
+        if metric not in idx:
+            continue
+        cand = []
+        for r in rows:
+            v = r[idx[metric]]
+            if metric == "highest" and isinstance(v, str):
+                v = int(v.rstrip("*")) if v.rstrip("*").isdigit() else None
+            if not isinstance(v, (int, float)):
+                continue
+            if metric in _RATE_METRICS | {"average", "strike_rate"} and sample_col:
+                sizes = sorted(x[idx[sample_col]] or 0 for x in rows)
+                if (r[idx[sample_col]] or 0) < 0.25 * sizes[len(sizes) // 2]:
+                    continue  # tiny sample -- a 3-ball cameo shouldn't "lead"
+            cand.append((v, r))
+        if not cand:
+            continue
+        v, r = (max if direction == "max" else min)(cand, key=lambda t: t[0])
+        key = ("best" if direction == "max" else "lowest") if metric != "economy" else "best"
+        if kind == "team" and metric == "win_pct":
+            key = "best" if direction == "max" else "worst"
+        shown = _num(r[idx[metric]])
+        out[f"{key}_{metric}"] = f"{shown} ({r[idx[label_col]]})"
+    total_cols = [c for c in ("runs", "wickets", "won", "matches") if c in idx]
+    if total_cols and label_col != "player":
+        out["totals"] = {c: sum((r[idx[c]] or 0) for r in rows) for c in total_cols}
+    return out
 
-    Requires the deliveries_wickets table (added in the current schema); if
-    the database predates it, returns an error explaining it must be
-    re-ingested rather than silently returning zeros.
-    """
-    if not _has_wickets_table():
+
+def _exprs() -> dict:
+    cat = catalog.get_catalog()
+    if cat.has_new_schema:
         return {
-            "error": "Fielding stats need the deliveries_wickets table, which this database "
-            "lacks -- it was built with an older ingest. Re-run backend/ingest/build_db.py "
-            "against the raw Cricsheet JSON to rebuild it."
+            "faced": "(d.extra_wides IS NULL)",
+            "legal": "(d.extra_wides IS NULL AND d.extra_noballs IS NULL)",
+            # extra_* columns come out of the pandas ingest as DOUBLE; keep runs integral.
+            "bowler_runs": "CAST(d.runs_total - COALESCE(d.extra_byes, 0) - COALESCE(d.extra_legbyes, 0) "
+                           "- COALESCE(d.extra_penalty, 0) AS BIGINT)",
         }
-
-    filt_sql, filt_params = _filters_sql(tournament, match_type, gender)
-    # fielders is a JSON-encoded array of names, e.g. '["A de Villiers"]' --
-    # cast it to a real array and test exact membership.
-    fielder_match = "list_contains(CAST(dw.fielders AS VARCHAR[]), ?)"
-
-    con = _get_connection()
-    try:
-        row = con.execute(
-            f"""
-            SELECT
-                COUNT(CASE WHEN dw.kind IN ('caught', 'caught and bowled') AND {fielder_match} THEN 1 END) AS catches,
-                COUNT(CASE WHEN dw.kind = 'stumped' AND {fielder_match} THEN 1 END) AS stumpings,
-                COUNT(CASE WHEN dw.kind = 'run out' AND {fielder_match} THEN 1 END) AS run_outs,
-                COUNT(DISTINCT CASE WHEN {fielder_match} THEN dw.match_id END) AS matches
-            FROM deliveries_wickets dw
-            JOIN matches m ON dw.match_id = m.match_id
-            WHERE dw.fielders IS NOT NULL{filt_sql}
-            """,
-            [player, player, player, player] + filt_params,
-        ).fetchone()
-    finally:
-        con.close()
-
-    catches, stumpings, run_outs, matches = row
     return {
-        "player": player,
-        "catches": catches or 0,
-        "stumpings": stumpings or 0,
-        "run_outs": run_outs or 0,
-        "matches": matches or 0,
-        "filters": {"tournament": tournament, "match_type": match_type, "gender": gender},
+        "faced": "(d.extra_type IS NULL OR d.extra_type <> 'wides')",
+        "legal": "(d.extra_type IS NULL OR d.extra_type NOT IN ('wides', 'noballs'))",
+        "bowler_runs": "(d.runs_total - CASE WHEN d.extra_type IN ('byes', 'legbyes', 'penalty') THEN d.runs_extras ELSE 0 END)",
     }
 
 
-def get_head_to_head(
-    team1: str,
-    team2: str,
-    tournament: str | None = None,
-    match_type: str | None = None,
-    gender: str | None = None,
-) -> dict:
-    """
-    Head-to-head record between two teams: matches played, each side's wins,
-    and draws/no-results, from the matches table.
+def _franchise_case(expr: str) -> str:
+    """Merge renamed franchises into one label when grouping by team."""
+    parts = []
+    for group in catalog.FRANCHISE_GROUPS:
+        parts.append(f"WHEN {expr} IN {lit_list(group)} THEN {lit(' / '.join(group))}")
+    return f"(CASE {' '.join(parts)} ELSE {expr} END)"
 
-    Team names must be the exact strings used in the database (e.g. "India",
-    "Australia"); resolve them with run_sql on DISTINCT team1/team2 if unsure.
-    """
-    filt_sql, filt_params = _filters_sql(tournament, match_type, gender)
 
-    con = _get_connection()
-    try:
-        row = con.execute(
-            f"""
-            SELECT
-                COUNT(*) AS played,
-                COUNT(CASE WHEN m.winner = ? THEN 1 END) AS team1_wins,
-                COUNT(CASE WHEN m.winner = ? THEN 1 END) AS team2_wins,
-                COUNT(CASE WHEN m.winner IS NULL OR m.winner = '' THEN 1 END) AS no_result,
-                MAX(m.date) AS last_meeting
-            FROM matches m
-            WHERE ((m.team1 = ? AND m.team2 = ?) OR (m.team1 = ? AND m.team2 = ?)){filt_sql}
-            """,
-            [team1, team2, team1, team2, team2, team1] + filt_params,
-        ).fetchone()
-    finally:
-        con.close()
+_OTHER_SIDE = "(CASE WHEN d.batting_team = m.team1 THEN m.team2 ELSE m.team1 END)"
 
-    played, team1_wins, team2_wins, no_result, last_meeting = row
-    return {
-        "team1": team1,
-        "team2": team2,
-        "played": played or 0,
-        "team1_wins": team1_wins or 0,
-        "team2_wins": team2_wins or 0,
-        "no_result_or_draw": no_result or 0,
-        "last_meeting": last_meeting,
-        "filters": {"tournament": tournament, "match_type": match_type, "gender": gender},
+SPLITS = ("season", "year", "format", "competition", "opposition", "team", "venue", "phase", "innings")
+
+
+def _key_expr(split_by: str | None, role: str) -> str:
+    if not split_by:
+        return "'all'"
+    split_by = split_by.lower().strip()
+    fielding_side = _OTHER_SIDE
+    exprs = {
+        "season": "m.season",
+        "year": YEAR_SQL,
+        "format": FORMAT_LABEL_SQL,
+        "competition": "COALESCE(m.event_name, 'Bilateral / other')",
+        "venue": "trim(regexp_replace(split_part(m.venue, ',', 1), '\\.\\s*', ' ', 'g'))",
+        "phase": PHASE_SQL,
+        "innings": "d.innings_num",
+        "opposition": _franchise_case(_OTHER_SIDE if role == "batting" else "d.batting_team"),
+        "team": _franchise_case("d.batting_team" if role == "batting" else fielding_side),
     }
+    if split_by not in exprs:
+        raise ValueError(f"split_by must be one of: {', '.join(SPLITS)}")
+    return exprs[split_by]
 
 
-def get_venue_stats(
-    venue: str,
-    tournament: str | None = None,
-    match_type: str | None = None,
-    gender: str | None = None,
-) -> dict:
-    """
-    Venue record: matches hosted, highest innings total (with team), and
-    average first-innings total.
-
-    The venue string must match how the database spells it (e.g. "Wankhede
-    Stadium"); resolve it first with run_sql on DISTINCT venue if unsure.
-    """
-    filt_sql, filt_params = _filters_sql(tournament, match_type, gender)
-
-    con = _get_connection()
-    try:
-        matches_row = con.execute(
-            f"""
-            SELECT COUNT(*) FROM matches m WHERE m.venue = ?{filt_sql}
-            """,
-            [venue] + filt_params,
-        ).fetchone()
-        matches_played = matches_row[0] or 0
-
-        highest = con.execute(
-            f"""
-            SELECT t.total, t.batting_team, m.date
-            FROM (
-                SELECT match_id, innings_num, batting_team, SUM(runs_total) AS total
-                FROM deliveries GROUP BY 1, 2, 3
-            ) t
-            JOIN matches m ON t.match_id = m.match_id
-            WHERE m.venue = ?{filt_sql}
-            ORDER BY t.total DESC
-            LIMIT 1
-            """,
-            [venue] + filt_params,
-        ).fetchone()
-
-        avg_first = con.execute(
-            f"""
-            SELECT AVG(t.total)
-            FROM (
-                SELECT match_id, SUM(runs_total) AS total
-                FROM deliveries WHERE innings_num = 1 GROUP BY 1
-            ) t
-            JOIN matches m ON t.match_id = m.match_id
-            WHERE m.venue = ?{filt_sql}
-            """,
-            [venue] + filt_params,
-        ).fetchone()[0]
-    finally:
-        con.close()
-
-    return {
-        "venue": venue,
-        "matches_played": matches_played,
-        "highest_total": {
-            "runs": highest[0],
-            "team": highest[1],
-            "date": highest[2],
-        } if highest else None,
-        "average_first_innings_total": round(avg_first, 1) if avg_first is not None else None,
-        "filters": {"tournament": tournament, "match_type": match_type, "gender": gender},
-    }
-
-
-def get_season_trend(
-    player: str,
-    stat_type: str = "batting",
-    tournament: str | None = None,
-    match_type: str | None = None,
-    gender: str | None = None,
-) -> dict:
-    """
-    Per-season trend rows for a player, ready to hand to plot_chart:
-    {"columns": [...], "rows": [[season, ...], ...]}.
-
-    stat_type "batting" gives season, matches, runs, balls_faced, average,
-    strike_rate; "bowling" gives season, matches, wickets, balls_bowled,
-    economy, average. Uses the same correct formulas as
-    get_batting_stats/get_bowling_stats, just grouped by season.
-    """
-    if stat_type not in ("batting", "bowling"):
-        return {"error": "stat_type must be 'batting' or 'bowling'"}
-
-    filt_sql, filt_params = _filters_sql(tournament, match_type, gender)
-    new_schema = "extra_wides" in _deliveries_columns()
-
-    if stat_type == "batting":
-        balls_faced_expr = "d.extra_wides IS NULL" if new_schema else "(d.extra_type IS NULL OR d.extra_type != 'wides')"
-        columns = ["season", "matches", "runs", "balls_faced", "average", "strike_rate"]
-        con = _get_connection()
-        try:
-            rows = con.execute(
-                f"""
-                SELECT
-                    m.season,
-                    COUNT(DISTINCT d.match_id) AS matches,
-                    SUM(d.runs_batter) AS runs,
-                    COUNT(CASE WHEN {balls_faced_expr} THEN 1 END) AS balls_faced,
-                    NULL AS average,
-                    NULL AS strike_rate
-                FROM deliveries d
-                JOIN matches m ON d.match_id = m.match_id
-                WHERE d.batter = ?{filt_sql}
-                GROUP BY m.season
-                ORDER BY m.season
-                """,
-                [player] + filt_params,
-            ).fetchall()
-            if _has_wickets_table():
-                dismissals = dict(con.execute(
-                    f"""
-                    SELECT m.season, COUNT(*)
-                    FROM deliveries_wickets dw
-                    JOIN matches m ON dw.match_id = m.match_id
-                    WHERE dw.player_out = ?{filt_sql}
-                    GROUP BY m.season
-                    """,
-                    [player] + filt_params,
-                ).fetchall())
-            else:
-                dismissals = dict(con.execute(
-                    f"""
-                    SELECT m.season, COUNT(*)
-                    FROM deliveries d
-                    JOIN matches m ON d.match_id = m.match_id
-                    WHERE d.is_wicket AND d.player_dismissed = ?{filt_sql}
-                    GROUP BY m.season
-                    """,
-                    [player] + filt_params,
-                ).fetchall())
-        finally:
-            con.close()
-
-        out_rows = []
-        for season, matches, runs, balls_faced, _, _ in rows:
-            d = dismissals.get(season, 0)
-            out_rows.append([
-                season,
-                matches or 0,
-                runs or 0,
-                balls_faced or 0,
-                round((runs or 0) / d, 2) if d else None,
-                round(100.0 * (runs or 0) / balls_faced, 2) if balls_faced else None,
-            ])
-        return {"columns": columns, "rows": out_rows}
-
-    # bowling
-    if new_schema:
-        runs_conceded_expr = (
-            "d.runs_total - COALESCE(d.extra_byes, 0) - COALESCE(d.extra_legbyes, 0) - COALESCE(d.extra_penalty, 0)"
-        )
-        balls_bowled_expr = "d.extra_wides IS NULL AND d.extra_noballs IS NULL"
+def _ball_ctes(scope: Scope, role: str, key: str = "'all'", where: str = "") -> str:
+    """The two CTEs every ball-level query starts from:
+        b -- scoped deliveries with derived columns (faced, legal,
+             bowler_runs) and a grouping key k
+        w -- one row per wicket on a scoped delivery (every wicket, when the
+             database has deliveries_wickets; else the first per ball)"""
+    e = _exprs()
+    clauses = scope.match_clauses() + scope.ball_clauses(role) + [NOT_SUPER_OVER_SQL]
+    if where:
+        clauses.append(where)
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    b = f"""
+b AS MATERIALIZED (
+    SELECT d.match_id, d.innings_num, d.over_num, d.ball_in_over, d.batting_team,
+           d.batter, d.bowler, d.non_striker, d.runs_batter, d.runs_total,
+           d.is_wicket, d.wicket_kind, d.player_dismissed,
+           {e['faced']} AS faced, {e['legal']} AS legal, {e['bowler_runs']} AS bowler_runs,
+           {_OTHER_SIDE} AS fielding_team,
+           m.date, m.season, m.team1, m.team2, m.venue, m.event_name, m.match_type,
+           COALESCE(CAST(({key}) AS VARCHAR), 'n/a') AS k
+    FROM deliveries d JOIN matches m ON d.match_id = m.match_id
+    {where_sql}
+)"""
+    if catalog.get_catalog().has_wickets_table:
+        w = """
+w AS (
+    SELECT b.*, dw.kind, dw.player_out, dw.fielders
+    FROM deliveries_wickets dw
+    JOIN b ON dw.match_id = b.match_id AND dw.innings_num = b.innings_num
+          AND dw.over_num = b.over_num AND dw.ball_in_over = b.ball_in_over
+)"""
     else:
-        runs_conceded_expr = "CASE WHEN d.extra_type IN ('byes', 'legbyes') THEN d.runs_total - d.runs_extras ELSE d.runs_total END"
-        balls_bowled_expr = "d.extra_type IS NULL OR d.extra_type NOT IN ('wides', 'noballs')"
+        w = """
+w AS (
+    SELECT b.*, b.wicket_kind AS kind, b.player_dismissed AS player_out, CAST(NULL AS VARCHAR) AS fielders
+    FROM b WHERE b.is_wicket
+)"""
+    return b + "," + w
 
-    con = _get_connection()
-    try:
-        rows = con.execute(
-            f"""
-            SELECT
-                m.season,
-                COUNT(DISTINCT d.match_id) AS matches,
-                SUM({runs_conceded_expr}) AS runs_conceded,
-                COUNT(CASE WHEN {balls_bowled_expr} THEN 1 END) AS balls_bowled
-            FROM deliveries d
-            JOIN matches m ON d.match_id = m.match_id
-            WHERE d.bowler = ?{filt_sql}
-            GROUP BY m.season
-            ORDER BY m.season
-            """,
-            [player] + filt_params,
-        ).fetchall()
-        if _has_wickets_table():
-            wickets = dict(con.execute(
-                f"""
-                SELECT m.season, COUNT(*)
-                FROM deliveries_wickets dw
-                JOIN deliveries d
-                  ON dw.match_id = d.match_id AND dw.innings_num = d.innings_num
-                 AND dw.over_num = d.over_num AND dw.ball_in_over = d.ball_in_over
-                JOIN matches m ON d.match_id = m.match_id
-                WHERE d.bowler = ? AND dw.kind IN ({_credited_sql}){filt_sql}
-                GROUP BY m.season
-                """,
-                [player] + filt_params,
-            ).fetchall())
+
+# ---------------------------------------------------------------------------
+# Core aggregations (per player x key)
+# ---------------------------------------------------------------------------
+
+def _batting_innings_ctes(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
+    """CTE chain ending in `inn`: one row per player per innings (per key),
+    counting non-striker appearances so a batter run out without facing
+    still has an innings."""
+    where = ""
+    if players:
+        pl = lit_list(players)
+        where = f"(d.batter IN {pl} OR d.non_striker IN {pl})"
+    return f"""
+WITH {_ball_ctes(scope, 'batting', key, where)},
+apps AS (
+    SELECT batter AS player, match_id, innings_num, k, date, batting_team FROM b
+    UNION
+    SELECT non_striker, match_id, innings_num, k, date, batting_team FROM b WHERE non_striker IS NOT NULL
+),
+bat AS (
+    SELECT batter AS player, match_id, innings_num, k,
+           SUM(runs_batter) AS runs, SUM(CAST(faced AS INTEGER)) AS balls,
+           SUM(CAST(runs_batter = 4 AS INTEGER)) AS fours, SUM(CAST(runs_batter = 6 AS INTEGER)) AS sixes,
+           SUM(CAST(faced AND runs_batter = 0 AS INTEGER)) AS dots
+    FROM b GROUP BY batter, match_id, innings_num, k
+),
+outs AS (
+    SELECT player_out AS player, match_id, innings_num, k, COUNT(*) AS outs
+    FROM w WHERE player_out IS NOT NULL AND kind NOT IN {NOT_DISMISSALS_SQL}
+    GROUP BY player_out, match_id, innings_num, k
+),
+inn AS (
+    SELECT a.player, a.match_id, a.innings_num, a.k, a.date, a.batting_team,
+           COALESCE(bat.runs, 0) AS runs, COALESCE(bat.balls, 0) AS balls,
+           COALESCE(bat.fours, 0) AS fours, COALESCE(bat.sixes, 0) AS sixes,
+           COALESCE(bat.dots, 0) AS dots, COALESCE(o.outs, 0) AS outs
+    FROM apps a
+    LEFT JOIN bat ON bat.player = a.player AND bat.match_id = a.match_id
+                 AND bat.innings_num = a.innings_num AND bat.k = a.k
+    LEFT JOIN outs o ON o.player = a.player AND o.match_id = a.match_id
+                    AND o.innings_num = a.innings_num AND o.k = a.k
+)"""
+
+
+def _batting_sql(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
+    final_where = f"WHERE player IN {lit_list(players)}" if players else ""
+    return f"""{_batting_innings_ctes(scope, key, players)},
+agg AS (
+    SELECT player, k,
+           mode(batting_team) AS team,
+           COUNT(DISTINCT match_id) AS matches, COUNT(*) AS innings,
+           COUNT(*) - SUM(outs) AS not_outs, SUM(outs) AS outs, SUM(outs) AS dismissals,
+           SUM(runs) AS runs, SUM(balls) AS balls,
+           arg_max(CAST(runs AS VARCHAR) || CASE WHEN outs = 0 THEN '*' ELSE '' END,
+                   runs * 2 + CAST(outs = 0 AS INTEGER)) AS highest,
+           SUM(CAST(runs >= 100 AS INTEGER)) AS hundreds,
+           SUM(CAST(runs >= 50 AND runs < 100 AS INTEGER)) AS fifties,
+           SUM(CAST(runs = 0 AND outs > 0 AS INTEGER)) AS ducks,
+           SUM(fours) AS fours, SUM(sixes) AS sixes, SUM(dots) AS dots,
+           MIN(date) AS first_date, MAX(date) AS last_date
+    FROM inn GROUP BY player, k
+)
+SELECT *,
+       CAST(runs AS DOUBLE) / NULLIF(outs, 0) AS average,
+       100.0 * runs / NULLIF(balls, 0) AS strike_rate,
+       100.0 * dots / NULLIF(balls, 0) AS dot_pct,
+       100.0 * (fours + sixes) / NULLIF(balls, 0) AS boundary_pct,
+       CAST(balls AS DOUBLE) / NULLIF(sixes, 0) AS balls_per_six
+FROM agg {final_where}
+"""
+
+
+def _bowling_innings_ctes(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
+    """CTE chain ending in `inn` (one row per bowler per innings) plus `mdn`
+    (maidens per bowler per key)."""
+    where = f"d.bowler IN {lit_list(players)}" if players else ""
+    return f"""
+WITH {_ball_ctes(scope, 'bowling', key, where)},
+bowl AS (
+    SELECT bowler AS player, match_id, innings_num, k, MIN(date) AS date, any_value(fielding_team) AS team,
+           SUM(CAST(legal AS INTEGER)) AS balls, SUM(bowler_runs) AS runs,
+           SUM(CAST(legal AND bowler_runs = 0 AS INTEGER)) AS dots,
+           SUM(CAST(runs_batter = 4 AS INTEGER)) AS fours, SUM(CAST(runs_batter = 6 AS INTEGER)) AS sixes
+    FROM b GROUP BY bowler, match_id, innings_num, k
+),
+wk AS (
+    SELECT bowler AS player, match_id, innings_num, k, COUNT(*) AS wkts
+    FROM w WHERE kind IN {CREDITED_SQL}
+    GROUP BY bowler, match_id, innings_num, k
+),
+ovr AS (
+    SELECT bowler AS player, k, match_id, innings_num, over_num,
+           SUM(CAST(legal AS INTEGER)) AS lb, SUM(bowler_runs) AS r
+    FROM b GROUP BY bowler, k, match_id, innings_num, over_num
+),
+mdn AS (SELECT player, k, COUNT(*) AS maidens FROM ovr WHERE lb >= 6 AND r = 0 GROUP BY player, k),
+inn AS (
+    SELECT bowl.*, COALESCE(wk.wkts, 0) AS wkts
+    FROM bowl LEFT JOIN wk ON wk.player = bowl.player AND wk.match_id = bowl.match_id
+                          AND wk.innings_num = bowl.innings_num AND wk.k = bowl.k
+)"""
+
+
+def _bowling_sql(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
+    return f"""{_bowling_innings_ctes(scope, key, players)},
+agg AS (
+    SELECT player, k, mode(team) AS team,
+           COUNT(DISTINCT match_id) AS matches, COUNT(*) AS innings,
+           SUM(balls) AS balls, SUM(runs) AS runs, SUM(wkts) AS wickets, SUM(dots) AS dots,
+           SUM(fours) AS fours, SUM(sixes) AS sixes,
+           arg_max(CAST(wkts AS VARCHAR) || '/' || CAST(runs AS VARCHAR), wkts * 100000 - runs) AS best,
+           SUM(CAST(wkts >= 4 AS INTEGER)) AS four_wkt_hauls,
+           SUM(CAST(wkts >= 5 AS INTEGER)) AS five_wkt_hauls,
+           MIN(date) AS first_date, MAX(date) AS last_date
+    FROM inn GROUP BY player, k
+)
+SELECT agg.*, COALESCE(mdn.maidens, 0) AS maidens,
+       CAST(agg.runs AS DOUBLE) / NULLIF(agg.wickets, 0) AS average,
+       6.0 * agg.runs / NULLIF(agg.balls, 0) AS economy,
+       CAST(agg.balls AS DOUBLE) / NULLIF(agg.wickets, 0) AS strike_rate,
+       100.0 * agg.dots / NULLIF(agg.balls, 0) AS dot_pct
+FROM agg LEFT JOIN mdn ON mdn.player = agg.player AND mdn.k = agg.k
+"""
+
+
+def _fielding_sql(scope: Scope, key: str = "'all'", players: list[str] | None = None) -> str:
+    final_where = f"WHERE player IN {lit_list(players)}" if players else ""
+    return f"""
+WITH {_ball_ctes(scope, 'bowling', key)},
+f AS (
+    SELECT kind, match_id, k, fielding_team AS team,
+           UNNEST(CASE WHEN kind = 'caught and bowled' THEN [bowler]
+                       ELSE CAST(COALESCE(fielders, '[]') AS VARCHAR[]) END) AS player
+    FROM w WHERE kind IN ('caught', 'caught and bowled', 'stumped', 'run out')
+)
+SELECT player, k, mode(team) AS team,
+       SUM(CAST(kind IN ('caught', 'caught and bowled') AS INTEGER)) AS catches,
+       SUM(CAST(kind = 'stumped' AS INTEGER)) AS stumpings,
+       SUM(CAST(kind = 'run out' AS INTEGER)) AS run_outs,
+       COUNT(*) AS dismissals, COUNT(DISTINCT match_id) AS matches_with_dismissal
+FROM f {final_where} GROUP BY player, k
+"""
+
+
+BAT_COLS = ["matches", "innings", "not_outs", "dismissals", "runs", "balls", "average", "strike_rate", "highest",
+            "hundreds", "fifties", "ducks", "fours", "sixes", "dot_pct", "boundary_pct"]
+BOWL_COLS = ["matches", "innings", "overs", "balls", "runs", "wickets", "average", "economy", "strike_rate",
+             "best", "four_wkt_hauls", "five_wkt_hauls", "maidens", "dot_pct"]
+FIELD_COLS = ["catches", "stumpings", "run_outs", "dismissals"]
+
+
+def _role_sql(role: str):
+    if role == "batting":
+        return _batting_sql, BAT_COLS
+    if role == "bowling":
+        return _bowling_sql, BOWL_COLS
+    if role == "fielding":
+        if not catalog.get_catalog().has_wickets_table:
+            raise ValueError(
+                "Fielding stats (catches/stumpings/run-outs) need fielder data, which this database doesn't "
+                "have -- it was built with an older ingest. Re-run backend/ingest/build_db.py against the "
+                "Cricsheet JSON to enable them."
+            )
+        return _fielding_sql, FIELD_COLS
+    raise ValueError("role must be 'batting', 'bowling' or 'fielding'.")
+
+
+def _row_values(r: dict, cols: list[str]) -> list:
+    out = []
+    for c in cols:
+        if c == "overs":
+            out.append(_overs(r.get("balls")))
         else:
-            wickets = dict(con.execute(
-                f"""
-                SELECT m.season, COUNT(*)
-                FROM deliveries d
-                JOIN matches m ON d.match_id = m.match_id
-                WHERE d.bowler = ? AND d.is_wicket AND d.wicket_kind IN ({_credited_sql}){filt_sql}
-                GROUP BY m.season
-                """,
-                [player] + filt_params,
-            ).fetchall())
-    finally:
-        con.close()
-
-    columns = ["season", "matches", "wickets", "overs", "economy", "average"]
-    out_rows = []
-    for season, matches, runs_conceded, balls_bowled in rows:
-        w = wickets.get(season, 0)
-        overs = (balls_bowled or 0) / 6.0
-        out_rows.append([
-            season,
-            matches or 0,
-            w,
-            round(overs, 1),
-            round((runs_conceded or 0) / overs, 2) if overs else None,
-            round((runs_conceded or 0) / w, 2) if w else None,
-        ])
-    return {"columns": columns, "rows": out_rows}
+            out.append(r.get(c))
+    return out
 
 
-def get_matchup(
-    batter: str,
-    bowler: str,
-    tournament: str | None = None,
-    match_type: str | None = None,
-    gender: str | None = None,
-) -> dict:
-    """
-    Batter-vs-bowler matchup across all deliveries where this exact pair met:
-    runs scored off the bat, balls faced (excluding wides), strike rate,
-    dismissals of the batter, and bowler-credited wickets.
-    """
-    filt_sql, filt_params = _filters_sql(tournament, match_type, gender)
-    new_schema = "extra_wides" in _deliveries_columns()
-    balls_faced_expr = "d.extra_wides IS NULL" if new_schema else "(d.extra_type IS NULL OR d.extra_type != 'wides')"
-
-    con = _get_connection()
-    try:
-        row = con.execute(
-            f"""
-            SELECT
-                SUM(d.runs_batter) AS runs,
-                COUNT(CASE WHEN {balls_faced_expr} THEN 1 END) AS balls_faced,
-                COUNT(CASE WHEN d.is_wicket AND d.player_dismissed = ? THEN 1 END) AS dismissals,
-                COUNT(CASE WHEN d.is_wicket AND d.player_dismissed = ?
-                          AND d.wicket_kind IN ({_credited_sql}) THEN 1 END) AS wickets,
-                COUNT(CASE WHEN {balls_faced_expr} AND d.runs_batter = 0 THEN 1 END) AS dots
-            FROM deliveries d
-            JOIN matches m ON d.match_id = m.match_id
-            WHERE d.batter = ? AND d.bowler = ?{filt_sql}
-            """,
-            [batter, batter, batter, bowler] + filt_params,
-        ).fetchone()
-
-        # On the new schema, use deliveries_wickets for dismissals/wickets:
-        # deliveries only records the FIRST wicket on a ball, so a caught
-        # behind a run-out on the same ball would otherwise be invisible here.
-        if _has_wickets_table():
-            dismissals, wickets = con.execute(
-                f"""
-                SELECT
-                    COUNT(CASE WHEN dw.player_out = ? THEN 1 END) AS dismissals,
-                    COUNT(CASE WHEN dw.player_out = ? AND dw.kind IN ({_credited_sql}) THEN 1 END) AS wickets
-                FROM deliveries_wickets dw
-                JOIN deliveries d
-                  ON dw.match_id = d.match_id AND dw.innings_num = d.innings_num
-                 AND dw.over_num = d.over_num AND dw.ball_in_over = d.ball_in_over
-                JOIN matches m ON d.match_id = m.match_id
-                WHERE d.batter = ? AND d.bowler = ?{filt_sql}
-                """,
-                [batter, batter, batter, bowler] + filt_params,
-            ).fetchone()
-        else:
-            dismissals, wickets = row[2], row[3]
-    finally:
-        con.close()
-
-    runs, balls_faced, _, _, dots = row
-    runs = runs or 0
-    balls_faced = balls_faced or 0
-    return {
-        "batter": batter,
-        "bowler": bowler,
-        "balls_faced": balls_faced,
-        "runs": runs,
-        "strike_rate": round(100.0 * runs / balls_faced, 2) if balls_faced else None,
-        "dismissals": dismissals or 0,
-        "wickets": wickets or 0,
-        "dots": dots or 0,
-        "filters": {"tournament": tournament, "match_type": match_type, "gender": gender},
-    }
+def _season_labels(rows: list[dict]) -> list[str]:
+    """IPL 2008 is stored as season '2007/08'; show the calendar year when
+    every match in a season fell in one year -- unless two seasons would then
+    share a label (e.g. a '2023/24' and a '2024/25' both played in 2024)."""
+    labels = []
+    for r in rows:
+        first, last = (r.get("first_date") or "")[:4], (r.get("last_date") or "")[:4]
+        labels.append(first if first and first == last else r["k"])
+    if len(set(labels)) < len(labels):
+        return [r["k"] for r in rows]
+    return labels
 
 
-_BATTING_METRICS = {"runs", "average", "strike_rate", "fours", "sixes", "matches", "balls_faced", "dismissals"}
-_BOWLING_METRICS = {"wickets", "economy", "runs_conceded", "balls_bowled", "overs"}
-# "average" and "strike_rate" exist for both batting and bowling with different
-# meanings -- when ambiguous, compare_players needs an explicit `stat_type`.
+def _order_split_rows(rows: list[dict], split_by: str, role: str) -> list[dict]:
+    if split_by in ("season", "year"):
+        return sorted(rows, key=lambda r: r.get("first_date") or "")
+    if split_by == "phase":
+        order = {"powerplay": 0, "middle": 1, "death": 2}
+        return sorted(rows, key=lambda r: order.get(r["k"], 9))
+    if split_by == "innings":
+        return sorted(rows, key=lambda r: int(r["k"]) if str(r["k"]).isdigit() else 9)
+    primary = {"batting": "runs", "bowling": "wickets", "fielding": "dismissals"}[role]
+    return sorted(rows, key=lambda r: -(r.get(primary) or 0))
 
 
-def compare_players(
-    players: list[str],
-    metric: str,
-    stat_type: str = "batting",
-    tournament: str | None = None,
-    match_type: str | None = None,
-    gender: str | None = None,
-) -> dict:
-    """
-    Computes one metric across multiple players, ready to hand straight to
-    plot_chart. stat_type is "batting" or "bowling" -- required because
-    metrics like "average" and "strike_rate" mean different things for each.
+def _coverage_note(first_date: str | None) -> str | None:
+    cat = catalog.get_catalog()
+    if first_date and cat.date_min and first_date[:4] <= str(int(cat.date_min[:4]) + 1):
+        return (f"The data starts in {cat.date_min[:4]} (Cricsheet coverage), so any career before that "
+                "is missing -- these are not full career figures.")
+    return None
 
-    Returns {"columns": ["player", metric], "rows": [[name, value], ...]} or
-    {"error": "..."} if the metric/stat_type combination isn't recognized.
-    """
-    if stat_type == "batting":
-        if metric not in _BATTING_METRICS:
-            return {"error": f"Unknown batting metric '{metric}'. Valid: {sorted(_BATTING_METRICS)}"}
-        stats_fn = get_batting_stats
-    elif stat_type == "bowling":
-        if metric not in _BOWLING_METRICS and metric not in {"average", "strike_rate"}:
-            return {"error": f"Unknown bowling metric '{metric}'. Valid: {sorted(_BOWLING_METRICS | {'average', 'strike_rate'})}"}
-        stats_fn = get_bowling_stats
-    else:
-        return {"error": "stat_type must be 'batting' or 'bowling'"}
 
+def _matches_played(player: str, scope: Scope) -> int:
+    """Matches in the playing XI (includes games where they didn't bat/bowl)."""
+    clauses = scope.match_clauses() + [f"pm.player = {lit(player)}"]
+    if scope.team:
+        clauses.append(f"pm.team IN {lit_list(scope.team)}")
+    if scope.opposition:
+        clauses.append(f"pm.team NOT IN {lit_list(scope.opposition)}")
+    rows = _query(
+        "SELECT COUNT(DISTINCT pm.match_id) AS n FROM players_matches pm "
+        f"JOIN matches m ON pm.match_id = m.match_id WHERE {' AND '.join(clauses)}"
+    )
+    return rows[0]["n"] if rows else 0
+
+
+# ---------------------------------------------------------------------------
+# Public tools
+# ---------------------------------------------------------------------------
+
+@_tool
+def player_stats(player: str, role: str = "batting", split_by: str | None = None, **filters) -> dict:
+    """A player's batting, bowling or fielding figures in any scope, optionally
+    split by season/year/format/competition/opposition/team/venue/phase/innings."""
+    role = (role or "batting").lower()
+    scope_gender = catalog.resolve_gender(filters.get("gender")) if filters.get("gender") else None
+    p = catalog.resolve_player(player, gender=scope_gender)
+    scope = build_scope(**filters)
+    if p.note:
+        scope.notes.insert(0, p.note)
+
+    sql_fn, cols = _role_sql(role)
+    key = _key_expr(split_by, role)
+    rows = _query(sql_fn(scope, key, [p.name]))
+
+    title = f"{role.capitalize()} — {p.name}"
+    if scope.applied:
+        title += " — " + ", ".join(str(v) for k, v in scope.applied.items() if k != "gender")
+
+    if not rows:
+        return _result(title, cols, [], scope, notes=[
+            f"No {role} records for {p.name} with these filters. Check the filters (e.g. did they play "
+            "in this competition/format?) before telling the user it never happened."
+        ], player=p.name)
+
+    notes = []
+    if split_by:
+        split_by = split_by.lower()
+        rows = _order_split_rows(rows, split_by, role)
+        keys = _season_labels(rows) if split_by == "season" else [r["k"] for r in rows]
+        table_rows = [[k] + _row_values(r, cols) for k, r in zip(keys, rows)]
+        return _result(f"{title} — by {split_by}", [split_by] + cols, table_rows, scope, notes, player=p.name,
+                       highlights=_highlights([split_by] + cols, table_rows, split_by, role))
+
+    r = rows[0]
+    if role == "batting" and not scope.has_ball_filters:
+        r["matches"] = _matches_played(p.name, scope)
+    note = _coverage_note(r.get("first_date"))
+    if note and not (scope.from_year or scope.season):
+        notes.append(note)
+    return _result(title, cols, [_row_values(r, cols)], scope, notes, player=p.name)
+
+
+@_tool
+def compare_players(players: list[str], role: str = "batting", **filters) -> dict:
+    """Full figures for several players side by side, in the same scope."""
+    role = (role or "batting").lower()
+    if not players or len(players) < 2:
+        raise ValueError("compare_players needs at least two players.")
+    scope_gender = catalog.resolve_gender(filters.get("gender")) if filters.get("gender") else None
+    resolved = [catalog.resolve_player(name, gender=scope_gender) for name in players]
+    scope = build_scope(**filters)
+    for p in resolved:
+        if p.note:
+            scope.notes.append(p.note)
+
+    sql_fn, cols = _role_sql(role)
+    names = [p.name for p in resolved]
+    by_name = {r["player"]: r for r in _query(sql_fn(scope, "'all'", names))}
     rows = []
-    for player in players:
-        result = stats_fn(player, tournament=tournament, match_type=match_type, gender=gender)
-        rows.append([player, result.get(metric)])
+    for name in names:
+        r = by_name.get(name)
+        if r is None:
+            rows.append([name] + [None] * len(cols))
+            scope.notes.append(f"{name} has no {role} records with these filters.")
+        else:
+            rows.append([name] + _row_values(r, cols))
+    title = f"{role.capitalize()} comparison" + (
+        " — " + ", ".join(str(v) for k, v in scope.applied.items() if k != "gender") if scope.applied else "")
+    return _result(title, ["player"] + cols, rows, scope, highlights=_highlights(["player"] + cols, rows, "player", role))
 
-    return {"columns": ["player", metric], "rows": rows}
+
+LEADERBOARD_METRICS = {
+    "batting": {
+        "runs": "DESC", "average": "DESC", "strike_rate": "DESC", "sixes": "DESC", "fours": "DESC",
+        "hundreds": "DESC", "fifties": "DESC", "innings": "DESC", "matches": "DESC", "ducks": "DESC",
+        "boundary_pct": "DESC", "dot_pct": "ASC", "balls_per_six": "ASC", "balls": "DESC",
+    },
+    "bowling": {
+        "wickets": "DESC", "economy": "ASC", "average": "ASC", "strike_rate": "ASC", "dot_pct": "DESC",
+        "maidens": "DESC", "five_wkt_hauls": "DESC", "four_wkt_hauls": "DESC", "balls": "DESC",
+        "matches": "DESC", "sixes": "DESC", "runs": "DESC",
+    },
+    "fielding": {"catches": "DESC", "stumpings": "DESC", "run_outs": "DESC", "dismissals": "DESC"},
+    "team": {"wins": "DESC", "win_pct": "DESC", "matches": "DESC", "losses": "DESC"},
+}
+# Rate metrics need a qualification threshold or they're won by someone who
+# faced 3 balls.
+_RATE_METRICS = {"average", "strike_rate", "economy", "dot_pct", "boundary_pct", "balls_per_six", "win_pct"}
+
+
+@_tool
+def leaderboard(role: str, metric: str, limit: int = 10, min_balls: int | None = None,
+                min_matches: int | None = None, **filters) -> dict:
+    """Top players (or teams) by a metric in any scope."""
+    role = (role or "").lower()
+    metric = (metric or "").lower().replace(" ", "_")
+    if role not in LEADERBOARD_METRICS:
+        raise ValueError(f"role must be one of: {', '.join(LEADERBOARD_METRICS)}")
+    metric = {"avg": "average", "sr": "strike_rate", "econ": "economy", "wkts": "wickets", "100s": "hundreds",
+              "50s": "fifties", "6s": "sixes", "4s": "fours", "win_percentage": "win_pct", "5w": "five_wkt_hauls",
+              "4w": "four_wkt_hauls", "five_wickets": "five_wkt_hauls", "catches_taken": "catches"}.get(metric, metric)
+    if metric not in LEADERBOARD_METRICS[role]:
+        raise ValueError(f"metric for role '{role}' must be one of: {', '.join(LEADERBOARD_METRICS[role])}")
+    limit = max(1, min(int(limit or 10), MAX_LIMIT))
+
+    if role == "team":
+        return _team_leaderboard(metric, limit, min_matches, filters)
+
+    scope = build_scope(default_gender="male", **filters)
+    sql_fn, cols = _role_sql(role)
+    direction = LEADERBOARD_METRICS[role][metric]
+
+    qual_sql, notes = "", []
+    if metric in _RATE_METRICS:
+        if min_balls is not None:
+            qual_sql = f"WHERE balls >= {int(min_balls)}"
+            notes.append(f"Qualification: at least {int(min_balls)} balls {'faced' if role == 'batting' else 'bowled'}.")
+        else:
+            # Scale the bar to the scope: 10% of the busiest player's balls
+            # (so an all-time IPL list needs ~700 balls, a single tournament ~30).
+            qual_sql = "WHERE balls >= GREATEST(30, 0.1 * max_balls)"
+            notes.append("Qualification: at least 10% of the balls of the busiest player in this scope "
+                         "(min 30) -- pass min_balls to change it.")
+    if role == "batting" and metric == "average":
+        qual_sql += (" AND " if qual_sql else "WHERE ") + "outs > 0"
+
+    tie = {"batting": "runs DESC", "bowling": "wickets DESC", "fielding": "dismissals DESC"}[role]
+    sql = f"""
+SELECT * FROM (
+    SELECT *, MAX({'balls' if role != 'fielding' else 'dismissals'}) OVER () AS max_balls
+    FROM ({sql_fn(scope)}) base
+) x {qual_sql}
+ORDER BY {metric} {direction} NULLS LAST, {tie}, player
+LIMIT {limit}
+"""
+    rows = _query(sql)
+    if qual_sql and rows and min_balls is None:
+        threshold = max(30, math.ceil(0.1 * rows[0]["max_balls"]))
+        notes[-1] = f"Qualification: at least {threshold} balls {'faced' if role == 'batting' else 'bowled'} " \
+                    "(10% of the busiest player in this scope, min 30) -- pass min_balls to change it."
+
+    show = {
+        "batting": ["team", "matches", "innings", "runs", "average", "strike_rate", "hundreds", "fifties", "sixes", "balls"],
+        "bowling": ["team", "matches", "wickets", "average", "economy", "strike_rate", "best", "overs"],
+        "fielding": ["team", "catches", "stumpings", "run_outs", "dismissals"],
+    }[role]
+    if metric not in show:
+        show = show + [metric]
+    table_rows = [[i + 1, r["player"]] + _row_values(r, show) for i, r in enumerate(rows)]
+    if not (scope.season or scope.from_year or scope.to_year):
+        note = _coverage_note(min((r.get("first_date") or "9999") for r in rows) if rows else None)
+        if note:
+            notes.append(note.replace("any career before that is missing -- these are not full career figures",
+                                      "players whose careers began earlier are undercounted"))
+    title = f"Top {limit} by {metric.replace('_', ' ')} ({role})"
+    if scope.applied:
+        title += " — " + ", ".join(str(v) for k, v in scope.applied.items())
+    return _result(title, ["rank", "player"] + show, table_rows, scope, notes)
+
+
+def _team_leaderboard(metric: str, limit: int, min_matches: int | None, filters: dict) -> dict:
+    scope = build_scope(default_gender="male", **filters)
+    team_expr = _franchise_case("team")
+    clauses = scope.match_clauses()
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    notes = []
+    qual = ""
+    if metric == "win_pct":
+        n = int(min_matches) if min_matches else 10
+        qual = f"WHERE decided >= {n}"
+        notes.append(f"Qualification: at least {n} decided matches.")
+    direction = LEADERBOARD_METRICS["team"][metric]
+    sql = f"""
+WITH m AS (SELECT m.* FROM matches m {where}),
+t AS (
+    SELECT team1 AS team, winner FROM m UNION ALL SELECT team2, winner FROM m
+),
+agg AS (
+    SELECT {team_expr} AS team, COUNT(*) AS matches,
+           SUM(CAST(winner = team AS INTEGER)) AS wins,
+           SUM(CAST(winner IS NOT NULL AND winner <> team AS INTEGER)) AS losses,
+           SUM(CAST(winner IS NULL AS INTEGER)) AS no_result,
+           SUM(CAST(winner IS NOT NULL AS INTEGER)) AS decided
+    FROM t WHERE team IS NOT NULL GROUP BY 1
+)
+SELECT *, 100.0 * wins / NULLIF(decided, 0) AS win_pct FROM agg {qual}
+ORDER BY {metric} {direction} NULLS LAST, wins DESC, team LIMIT {limit}
+"""
+    rows = _query(sql)
+    cols = ["matches", "wins", "losses", "no_result", "win_pct"]
+    table_rows = [[i + 1, r["team"]] + [r[c] for c in cols] for i, r in enumerate(rows)]
+    notes.append("no_result counts ties, draws and abandoned/no-result games together (win % is over decided games).")
+    title = f"Teams by {metric.replace('_', ' ')}"
+    if scope.applied:
+        title += " — " + ", ".join(str(v) for v in scope.applied.values())
+    return _result(title, ["rank", "team"] + cols, table_rows, scope, notes)
+
+
+@_tool
+def top_performances(kind: str, limit: int = 10, order: str = "highest", player: str | None = None, **filters) -> dict:
+    """Record lists: best individual innings, best bowling figures, or
+    highest/lowest team totals."""
+    kind = (kind or "").lower().replace(" ", "_")
+    kind = {"batting": "batting_innings", "innings": "batting_innings", "scores": "batting_innings",
+            "highest_scores": "batting_innings", "bowling": "bowling_figures", "figures": "bowling_figures",
+            "team_totals": "team_total", "totals": "team_total"}.get(kind, kind)
+    if kind not in ("batting_innings", "bowling_figures", "team_total"):
+        raise ValueError("kind must be 'batting_innings', 'bowling_figures' or 'team_total'.")
+    limit = max(1, min(int(limit or 10), MAX_LIMIT))
+    lowest = (order or "highest").lower().startswith("low")
+    scope = build_scope(default_gender=None if player else "male", **filters)
+    pname = None
+    if player:
+        p = catalog.resolve_player(player, gender=scope.gender)
+        pname = p.name
+        if p.note:
+            scope.notes.insert(0, p.note)
+
+    match_info = "m.date, m.venue, m.event_name, m.team1, m.team2"
+    if kind == "batting_innings":
+        sql = f"""{_batting_innings_ctes(scope, "'all'", [pname] if pname else None)}
+SELECT inn.player, inn.runs, inn.balls, inn.fours, inn.sixes, inn.outs, inn.batting_team AS team,
+       100.0 * inn.runs / NULLIF(inn.balls, 0) AS strike_rate, {match_info}
+FROM inn JOIN matches m ON inn.match_id = m.match_id
+{f"WHERE inn.player = {lit(pname)}" if pname else ""}
+ORDER BY inn.runs {'ASC' if lowest else 'DESC'}, inn.balls ASC LIMIT {limit}
+"""
+        rows = _query(sql)
+        cols = ["player", "score", "balls", "fours", "sixes", "strike_rate", "team", "opposition", "venue", "date", "competition"]
+        table = [[r["player"], f"{r['runs']}{'*' if r['outs'] == 0 else ''}", r["balls"], r["fours"], r["sixes"],
+                  r["strike_rate"], r["team"], _opp(r, r["team"]), r["venue"], r["date"], r["event_name"]] for r in rows]
+        title = ("Lowest" if lowest else "Highest") + " individual scores"
+    elif kind == "bowling_figures":
+        sql = f"""{_bowling_innings_ctes(scope, "'all'", [pname] if pname else None)}
+SELECT inn.player, inn.wkts, inn.runs, inn.balls, inn.team, {match_info}
+FROM inn JOIN matches m ON inn.match_id = m.match_id
+WHERE inn.balls > 0 {f"AND inn.player = {lit(pname)}" if pname else ""}
+ORDER BY inn.wkts DESC, inn.runs ASC LIMIT {limit}
+"""
+        rows = _query(sql)
+        cols = ["player", "figures", "overs", "economy", "team", "opposition", "venue", "date", "competition"]
+        table = [[r["player"], f"{r['wkts']}/{r['runs']}", _overs(r["balls"]), 6.0 * r["runs"] / r["balls"],
+                  r["team"], _opp(r, r["team"]), r["venue"], r["date"], r["event_name"]] for r in rows]
+        title = "Best bowling figures in an innings"
+    else:
+        clauses = scope.match_clauses() + scope.ball_clauses("batting") + [NOT_SUPER_OVER_SQL]
+        where = "WHERE " + " AND ".join(clauses)
+        sql = f"""
+WITH t AS (
+    SELECT d.match_id, d.innings_num, d.batting_team, SUM(d.runs_total) AS total,
+           SUM(CAST(d.is_wicket AND d.wicket_kind NOT IN {NOT_DISMISSALS_SQL} AS INTEGER)) AS wickets
+    FROM deliveries d JOIN matches m ON d.match_id = m.match_id {where}
+    GROUP BY d.match_id, d.innings_num, d.batting_team
+)
+SELECT t.*, {match_info}, m.match_type FROM t JOIN matches m ON t.match_id = m.match_id
+{"WHERE t.wickets >= 10" if lowest else ""}
+ORDER BY t.total {'ASC' if lowest else 'DESC'} LIMIT {limit}
+"""
+        rows = _query(sql)
+        cols = ["team", "total", "opposition", "innings", "venue", "date", "competition", "format"]
+        table = [[r["batting_team"], f"{r['total']}/{r['wickets']}" if r["wickets"] < 10 else str(r["total"]),
+                  _opp(r, r["batting_team"]), r["innings_num"], r["venue"], r["date"], r["event_name"], r["match_type"]]
+                 for r in rows]
+        title = ("Lowest all-out" if lowest else "Highest") + " team totals"
+        if lowest:
+            scope.notes.append("Lowest totals only include innings where the side was bowled out.")
+    if scope.applied:
+        title += " — " + ", ".join(str(v) for v in scope.applied.values())
+    return _result(title, cols, table, scope)
+
+
+def _opp(r: dict, team: str | None) -> str | None:
+    if team is None:
+        return None
+    return r["team2"] if r["team1"] == team else r["team1"]
+
+
+@_tool
+def team_stats(team: str, opposition: str | None = None, split_by: str | None = None, **filters) -> dict:
+    """A team's results record (won/lost/win %, batting first vs chasing, toss),
+    optionally against one opponent (head-to-head) and/or split by
+    season/year/format/competition/opposition/venue."""
+    split_by = split_by.lower() if split_by else None
+    allowed = ("season", "year", "format", "competition", "opposition", "venue")
+    if split_by and split_by not in allowed:
+        raise ValueError(f"team_stats split_by must be one of: {', '.join(allowed)}")
+    scope = build_scope(team=team, opposition=opposition, default_gender="male", **filters)
+    T = lit_list(scope.team)
+    other = f"(CASE WHEN m.team1 IN {T} THEN m.team2 ELSE m.team1 END)"
+    key = {
+        None: "'all'", "season": "m.season", "year": YEAR_SQL, "format": FORMAT_LABEL_SQL,
+        "competition": "COALESCE(m.event_name, 'Bilateral / other')", "opposition": _franchise_case(other),
+        "venue": "trim(regexp_replace(split_part(m.venue, ',', 1), '\\.\\s*', ' ', 'g'))",
+    }[split_by]
+    clauses = scope.match_clauses()
+    sql = f"""
+WITH m AS MATERIALIZED (SELECT m.* FROM matches m WHERE {' AND '.join(clauses)}),
+fb AS (
+    SELECT d.match_id, arg_min(d.batting_team, d.innings_num) AS first_bat
+    FROM deliveries d WHERE d.match_id IN (SELECT match_id FROM m) GROUP BY d.match_id
+),
+x AS (SELECT m.*, fb.first_bat, COALESCE(CAST(({key}) AS VARCHAR), 'n/a') AS k FROM m LEFT JOIN fb USING (match_id))
+SELECT k, COUNT(*) AS matches,
+       SUM(CAST(winner IN {T} AS INTEGER)) AS won,
+       SUM(CAST(winner IS NOT NULL AND winner NOT IN {T} AS INTEGER)) AS lost,
+       SUM(CAST(winner IS NULL AS INTEGER)) AS no_result,
+       SUM(CAST(first_bat IN {T} AS INTEGER)) AS batted_first,
+       SUM(CAST(first_bat IN {T} AND winner IN {T} AS INTEGER)) AS won_batting_first,
+       SUM(CAST(first_bat IS NOT NULL AND first_bat NOT IN {T} AS INTEGER)) AS chased,
+       SUM(CAST(first_bat IS NOT NULL AND first_bat NOT IN {T} AND winner IN {T} AS INTEGER)) AS won_chasing,
+       SUM(CAST(toss_winner IN {T} AS INTEGER)) AS tosses_won,
+       MIN(date) AS first_date, MAX(date) AS last_date
+FROM x GROUP BY k
+"""
+    rows = _query(sql)
+    cols = ["matches", "won", "lost", "no_result", "win_pct", "won_batting_first", "batted_first",
+            "won_chasing", "chased", "tosses_won"]
+    for r in rows:
+        decided = (r["won"] or 0) + (r["lost"] or 0)
+        r["win_pct"] = 100.0 * r["won"] / decided if decided else None
+    notes = ["no_result counts ties, draws and abandoned games; win_pct is won / (won + lost)."]
+
+    label = f"{scope.applied['team']}" + (f" vs {scope.applied['opposition']}" if opposition else "")
+    rest = ", ".join(str(v) for k, v in scope.applied.items() if k not in ("team", "opposition", "gender"))
+    title = f"Results — {label}" + (f" — {rest}" if rest else "")
+    if not rows:
+        return _result(title, cols, [], scope, ["No matches found with these filters."])
+
+    if split_by:
+        if split_by in ("season", "year"):
+            rows = sorted(rows, key=lambda r: r["first_date"] or "")
+        else:
+            rows = sorted(rows, key=lambda r: -r["matches"])
+        keys = _season_labels(rows) if split_by == "season" else [r["k"] for r in rows]
+        table = [[k] + [r[c] for c in cols] for k, r in zip(keys, rows)]
+        return _result(f"{title} — by {split_by}", [split_by] + cols, table, scope, notes,
+                       highlights=_highlights([split_by] + cols, table, split_by, "team"))
+
+    recent = _query(f"""
+SELECT m.date, {other} AS opposition, m.winner, m.win_by_runs, m.win_by_wickets, m.event_name, m.venue
+FROM matches m WHERE {' AND '.join(clauses)} ORDER BY m.date DESC LIMIT 5
+""")
+    recent_rows = []
+    for r in recent:
+        if r["winner"] is None:
+            res = "no result / tie / draw"
+        else:
+            won = r["winner"] in scope.team
+            margin = (f"by {int(r['win_by_runs'])} runs" if r["win_by_runs"] else
+                      f"by {int(r['win_by_wickets'])} wickets" if r["win_by_wickets"] else "")
+            res = f"{'won' if won else 'lost'} {margin}".strip()
+        recent_rows.append({"date": r["date"], "opposition": r["opposition"], "result": res,
+                            "competition": r["event_name"], "venue": r["venue"]})
+    return _result(title, cols, [[r[c] for c in cols] for r in rows], scope, notes, recent_results=recent_rows)
+
+
+@_tool
+def venue_stats(venue: str, **filters) -> dict:
+    """How a ground plays, per format: average 1st/2nd-innings scores, bat-first
+    vs chasing wins, toss decisions, highest total."""
+    scope = build_scope(venue=venue, default_gender="male", **filters)
+    clauses = scope.match_clauses()
+    sql = f"""
+WITH m AS MATERIALIZED (SELECT m.*, {FORMAT_LABEL_SQL} AS fmt FROM matches m WHERE {' AND '.join(clauses)}),
+inns AS (
+    SELECT d.match_id, d.innings_num, d.batting_team, SUM(d.runs_total) AS total
+    FROM deliveries d WHERE d.match_id IN (SELECT match_id FROM m)
+    GROUP BY d.match_id, d.innings_num, d.batting_team
+),
+fb AS (SELECT match_id, arg_min(batting_team, innings_num) AS first_bat FROM inns GROUP BY match_id),
+x AS (SELECT m.*, fb.first_bat FROM m LEFT JOIN fb USING (match_id))
+SELECT x.fmt AS format, COUNT(*) AS matches,
+       SUM(CAST(winner IS NOT NULL AND winner = first_bat AS INTEGER)) AS won_batting_first,
+       SUM(CAST(winner IS NOT NULL AND winner <> first_bat AS INTEGER)) AS won_chasing,
+       SUM(CAST(winner IS NULL AS INTEGER)) AS no_result,
+       SUM(CAST(toss_decision = 'bat' AS INTEGER)) AS toss_chose_bat,
+       SUM(CAST(toss_winner = winner AS INTEGER)) AS toss_winner_won,
+       (SELECT AVG(total) FROM inns i JOIN m m2 USING (match_id) WHERE i.innings_num = 1 AND m2.fmt = x.fmt) AS avg_first_innings,
+       (SELECT AVG(total) FROM inns i JOIN m m2 USING (match_id) WHERE i.innings_num = 2 AND m2.fmt = x.fmt) AS avg_second_innings,
+       (SELECT arg_max(CAST(total AS VARCHAR) || ' — ' || batting_team || ' (' || m2.date || ')', total)
+          FROM inns i JOIN m m2 USING (match_id) WHERE m2.fmt = x.fmt) AS highest_total
+FROM x GROUP BY x.fmt ORDER BY matches DESC
+"""
+    rows = _query(sql)
+    for r in rows:
+        decided = (r["won_batting_first"] or 0) + (r["won_chasing"] or 0)
+        r["bat_first_win_pct"] = 100.0 * r["won_batting_first"] / decided if decided else None
+        r["favours"] = (None if not decided else "batting first" if r["bat_first_win_pct"] > 55
+                        else "chasing" if r["bat_first_win_pct"] < 45 else "neither (roughly even)")
+    cols = ["format", "matches", "won_batting_first", "won_chasing", "bat_first_win_pct", "favours",
+            "avg_first_innings", "avg_second_innings", "no_result", "toss_chose_bat", "toss_winner_won",
+            "highest_total"]
+    title = f"Venue — {scope.applied['venue']}"
+    rest = ", ".join(str(v) for k, v in scope.applied.items() if k not in ("venue", "gender"))
+    if rest:
+        title += f" — {rest}"
+    notes = [
+        "Judge batting first vs chasing by won_batting_first vs won_chasing (bat_first_win_pct; 'favours' "
+        "uses a 55/45 split). avg_second_innings is always lower because chasing sides stop once they pass "
+        "the target -- it says nothing about which side is favoured.",
+        "Figures are per format; averages include rain-affected innings.",
+    ]
+    if not rows:
+        notes = ["No matches at this venue with these filters."]
+    return _result(title, cols, [[r[c] for c in cols] for r in rows], scope, notes)
+
+
+@_tool
+def matchup(batter: str | None = None, bowler: str | None = None, limit: int = 10, min_balls: int | None = None,
+            **filters) -> dict:
+    """Batter vs bowler head-to-head. Give both for one matchup; give only a
+    batter to list the bowlers who've troubled them most (or only a bowler
+    to list the batters they've dismissed most)."""
+    if not batter and not bowler:
+        raise ValueError("matchup needs a batter, a bowler, or both.")
+    g = catalog.resolve_gender(filters.get("gender")) if filters.get("gender") else None
+    bat = catalog.resolve_player(batter, gender=g) if batter else None
+    bowl = catalog.resolve_player(bowler, gender=g) if bowler else None
+    scope = build_scope(**filters)
+    for p in (bat, bowl):
+        if p and p.note:
+            scope.notes.insert(0, p.note)
+
+    where = []
+    if bat:
+        where.append(f"d.batter = {lit(bat.name)}")
+    if bowl:
+        where.append(f"d.bowler = {lit(bowl.name)}")
+    group = "batter, bowler"
+    sql = f"""
+WITH {_ball_ctes(scope, 'batting', "'all'", ' AND '.join(where))},
+agg AS (
+    SELECT {group}, COUNT(DISTINCT match_id) AS matches,
+           SUM(CAST(faced AS INTEGER)) AS balls, SUM(runs_batter) AS runs,
+           SUM(CAST(faced AND runs_batter = 0 AS INTEGER)) AS dots,
+           SUM(CAST(runs_batter = 4 AS INTEGER)) AS fours, SUM(CAST(runs_batter = 6 AS INTEGER)) AS sixes
+    FROM b GROUP BY {group}
+),
+outs AS (
+    SELECT {group}, COUNT(*) AS dismissals FROM w
+    WHERE kind IN {CREDITED_SQL} AND player_out = batter GROUP BY {group}
+)
+SELECT agg.*, COALESCE(outs.dismissals, 0) AS dismissals
+FROM agg LEFT JOIN outs USING (batter, bowler)
+"""
+    rows = _query(sql)
+    for r in rows:
+        r["strike_rate"] = 100.0 * r["runs"] / r["balls"] if r["balls"] else None
+        r["average"] = r["runs"] / r["dismissals"] if r["dismissals"] else None
+        r["dot_pct"] = 100.0 * r["dots"] / r["balls"] if r["balls"] else None
+    cols = ["balls", "runs", "dismissals", "strike_rate", "average", "dot_pct", "fours", "sixes", "matches"]
+    notes = ["Dismissals count only wickets credited to the bowler (run-outs excluded)."]
+
+    if bat and bowl:
+        title = f"{bat.name} vs {bowl.name}"
+        if not rows:
+            return _result(title, cols, [], scope, notes + [
+                f"{bat.name} never faced {bowl.name} with these filters."])
+        return _result(title, cols, [[rows[0][c] for c in cols]], scope, notes)
+
+    limit = max(1, min(int(limit or 10), MAX_LIMIT))
+    min_b = int(min_balls) if min_balls is not None else 12
+    rows = [r for r in rows if (r["balls"] or 0) >= min_b]
+    rows.sort(key=lambda r: (-r["dismissals"], r["average"] if r["average"] is not None else 1e9, -r["balls"]))
+    rows = rows[:limit]
+    other = "bowler" if bat else "batter"
+    title = f"{bat.name}: toughest bowlers" if bat else f"{bowl.name}: batters dismissed most"
+    notes.append(f"Only pairs with at least {min_b} balls; ranked by dismissals, then average.")
+    return _result(title, [other] + cols, [[r[other]] + [r[c] for c in cols] for r in rows], scope, notes)
+
+
+@_tool
+def lookup(kind: str, name: str) -> dict:
+    """See how a name resolves, with candidates -- for checking an ambiguous
+    player/team/venue/competition before answering."""
+    kind = (kind or "player").lower()
+    try:
+        if kind == "player":
+            ranked = catalog.rank_players(name, limit=8)
+            return {"kind": kind, "query": name,
+                    "candidates": [p.describe() for _, _, p in ranked]}
+        if kind in ("competition", "tournament"):
+            c = catalog.resolve_competition(name)
+            return {"kind": kind, "query": name, "resolved": c.events, "note": c.note}
+        if kind == "team":
+            t = catalog.resolve_team(name)
+            return {"kind": kind, "query": name, "resolved": t.names, "note": t.note}
+        if kind == "venue":
+            v = catalog.resolve_venue(name)
+            return {"kind": kind, "query": name, "resolved": v.venues, "note": v.note}
+    except ResolutionError as e:
+        return e.to_dict()
+    raise ValueError("kind must be player, competition, team or venue.")

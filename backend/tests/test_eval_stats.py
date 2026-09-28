@@ -25,14 +25,12 @@ CHECKED = [q for q in QUESTIONS if "check" in q]
 
 
 @pytest.fixture(autouse=True)
-def use_real_db(monkeypatch):
-    """Overrides conftest's autouse synthetic-DB fixture: the expected values
-    in eval_questions.json were captured against the real database."""
+def schema(monkeypatch):
+    """Overrides conftest's autouse (schema-parametrized) synthetic-DB
+    fixture: the expected values in eval_questions.json were captured
+    against the real database."""
     monkeypatch.setattr(tools_mod, "DB_PATH", REAL_DB)
-    monkeypatch.setattr(tools_mod, "_player_names_cache", None)
-    monkeypatch.setattr(tools_mod, "_tournament_names_cache", None)
-    monkeypatch.setattr(stats_mod, "_delivery_columns_cache", None)
-    yield
+    yield "real"
 
 
 def _resolve_tool(name):
@@ -42,6 +40,12 @@ def _resolve_tool(name):
 
 
 def _get_path(result, path):
+    """A dotted path into the result dict -- or, for a table result, a column
+    name, read from the first row."""
+    cols = result.get("columns")
+    if isinstance(cols, list) and path in cols and path not in result:
+        assert result["rows"], f"empty table: {result}"
+        return result["rows"][0][cols.index(path)]
     current = result
     for part in path.split("."):
         current = current[part]

@@ -13,18 +13,52 @@ backend/
 ├── ingest/
 │   └── build_db.py             # parses Cricsheet JSON -> normalized DuckDB tables (batched)
 ├── agent/
-│   ├── tools.py                # get_schema, run_sql, search_player/tournament, get_stats
-│   ├── stats.py                # batting/bowling/fielding/head-to-head/venue/trend/matchup tools
-│   ├── prompts.py              # system prompt
+│   ├── catalog.py              # name resolution: players, competitions, teams, venues, formats
+│   ├── scope.py                # shared filters (competition/format/team/venue/season/phase...) -> SQL
+│   ├── stats.py                # the analytics engine: player stats, splits, leaderboards, records,
+│   │                           #   team/venue records, matchups -- every scoring rule encoded once
+│   ├── tools.py                # run_sql (guarded), schema, autocomplete search, dataset counts
+│   ├── prompts.py              # system prompt (routing guide + worked examples)
 │   ├── cancellation.py         # in-flight request cancellation registry
-│   └── graph.py                # hand-rolled tool-calling reasoning loop
-├── tests/                      # pytest suite + eval questions
+│   └── graph.py                # hand-rolled tool-calling loop with grounding guards
+├── tests/                      # pytest suite (both DB schemas) + eval questions
 ├── checkdb.py                  # quick sanity check on the built database
 ├── main.py                     # FastAPI app, SSE streaming endpoint
 └── requirements.txt
 
 frontend/                       # React app ("Doosra")
 ```
+
+## How answers stay correct
+
+The model never writes cricket SQL or guesses database spellings for normal
+questions. It picks a tool and passes plain names; everything that decides
+whether a number is right is deterministic, tested code:
+
+- **Name resolution** (`catalog.py`). Cricsheet stores established players
+  by initials ("RG Sharma", "SPD Smith"), so plain fuzzy matching picked
+  obscure namesakes whose names are spelled out in full (the "Rohit Sharma"
+  in the data is an 8-match domestic player). The resolver matches given
+  names to initials and ranks namesakes by how much they've played. It
+  merges competitions split across naming eras (T20 World Cup = "ICC World
+  Twenty20" + "World T20" + "ICC Men's T20 World Cup"), renamed franchises
+  (RCB Bangalore/Bengaluru), and venue spellings. Ambiguous names ("Smith")
+  come back as candidates instead of a silent guess.
+- **Scoring rules** (`stats.py`). Dismissals are counted by the dismissed
+  player (non-striker run-outs), retired hurt isn't a dismissal, wides
+  aren't balls faced, byes aren't the bowler's, and super overs are
+  excluded. Every tool uses the same SQL building blocks, so they can't
+  disagree with each other.
+- **Grounded output** (`graph.py`). Tool results with rows go to the UI as
+  tables straight away. Charts are drawn from those tables by id, so the
+  model never copies numbers into them. An answer that quotes numbers with
+  no data lookup behind it gets sent back once. A `final_answer` sent in the
+  same batch as other tool calls is ignored, and running out of steps still
+  produces an answer.
+- **Stated assumptions**. Every result carries the filters it used and notes
+  (what a name resolved to, qualification thresholds, "defaulted to men's
+  cricket", data-coverage caveats), and the prompt asks the model to state
+  them.
 
 ## Backend setup
 
@@ -66,13 +100,21 @@ results, and a final `final_answer` event.
 dependency) so every step is transparent and emits an event:
 
 1. Send the question + system prompt to the LLM with tool schemas attached
-2. If the model calls a tool (`get_schema`, `search_player`, `run_sql`), run
-   it, emit the call and result as events, and feed the result back
-3. If a tool call errors (e.g. bad SQL), the error is fed back to the model
-   so it can self-correct — this is emitted as a distinct `self_correction`
-   event so the frontend can highlight it
-4. When the model calls `final_answer`, the loop ends and yields the summary
-   plus optional chart/table data
+2. If the model calls a tool (`player_stats`, `compare_players`,
+   `leaderboard`, `top_performances`, `team_stats`, `venue_stats`, `matchup`,
+   `lookup`, `run_sql`), run it and emit the call and result as events.
+   Results with rows also go out as `table` events (ids T1, T2...), and the
+   model gets them as records
+3. If a tool call errors (bad SQL, an ambiguous name with candidates), the
+   error is fed back to the model so it can self-correct. This is emitted as
+   a distinct `self_correction` event so the frontend can highlight it
+4. `plot_chart` draws from a table id, and the chart goes out as a `chart`
+   event
+5. When the model calls `final_answer`, the loop ends and yields the answer
+
+For a local model like Qwen3-14B, expect roughly 30–90s per question with
+thinking on (`LLM_THINKING=on`, the default). Turning it off is faster, but
+in testing it picked the wrong tool more often and misread results.
 
 `main.py` wraps this generator in a Server-Sent Events response so the React
 frontend can render each step as it happens.
@@ -106,10 +148,15 @@ pip install pytest
 pytest                       # deterministic tests: scoring rules, SQL guard, agent pieces
 ```
 
-`tests/eval_fixtures/eval_questions.json` holds ~35 natural-language
-questions with expected values. The deterministic tests run the stats
-functions directly against the built database (skipped if
-`data/cricket.duckdb` is absent). To run the LLM-in-the-loop eval (spends
+The fixture tests build a small synthetic database through the real ingest
+path and run every scoring-rule test against **both** database schemas (the
+current one and the older one without `deliveries_wickets`), plus the agent
+loop with a scripted fake LLM.
+
+`tests/eval_fixtures/eval_questions.json` holds 40 natural-language
+questions with expected values computed by independent SQL. The
+deterministic checks run the stats tools directly against the built
+database (skipped if `data/cricket.duckdb` is absent). To run the LLM-in-the-loop eval (spends
 API credits, needs a key):
 
 ```bash
@@ -118,11 +165,13 @@ pytest -m llm tests/test_llm_eval.py
 
 ## Next steps
 
-- Re-ingest `data/cricket.duckdb` with the new schema when convenient:
-  per-type extra columns and the `deliveries_wickets` table enable exact
-  multi-extra/multi-wicket scoring and fielding stats (until then, the stats
-  tools transparently fall back to the old-schema approximation)
-- Cricsheet `people.csv` registry for exact player-name resolution
+- Re-ingest `data/cricket.duckdb` with the current `build_db.py`: per-type
+  extra columns and the `deliveries_wickets` table enable exact
+  multi-extra/multi-wicket scoring and **fielding stats** (catches,
+  stumpings, run-outs). Until then the tools fall back to the old-schema
+  approximation, and fielding questions return an explanatory error
+- Cricsheet `people.csv` registry, to tell apart two different players who
+  share the same name
 - Deploy: frontend on Vercel, backend on Render/Railway/HF Spaces (bring a
   shared rate limiter + `CORS_ORIGINS` env var)
 
@@ -151,8 +200,10 @@ Key files:
   events arrive
 - `src/components/ReasoningTrace.jsx` — the collapsible live trace,
   auto-expanded while a turn is streaming
-- `src/components/ChartView.jsx` / `TableView.jsx` — render `chart_data` /
-  `table_data` from the `final_answer` event
+- `src/components/TableView.jsx` — renders each `table` event (title, the
+  filters applied, caveat notes) as soon as the tool returns
+- `src/components/ChartView.jsx` — renders `chart` events; several metrics
+  are drawn as separate small charts, never on one shared axis
 
 `npm run build` produces a static `dist/` you can deploy anywhere (Vercel,
 Netlify, etc.) — just make sure `VITE_API_BASE` points at your deployed

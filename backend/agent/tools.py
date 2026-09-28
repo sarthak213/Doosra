@@ -8,7 +8,6 @@ graph.py ends up using.
 """
 
 import re
-from difflib import get_close_matches
 from pathlib import Path
 
 import duckdb
@@ -111,108 +110,40 @@ def run_sql(query: str, max_rows: int = 200) -> dict:
         con.close()
 
 
-# In-process caches for the distinct name lists used by fuzzy matching --
-# these change only when the database is re-ingested, so re-querying them on
-# every search_player/search_tournament call is wasted DB work.
-_player_names_cache: list[str] | None = None
-_tournament_names_cache: list[str] | None = None
-
-
-def _load_player_names() -> list[str]:
-    global _player_names_cache
-    if _player_names_cache is None:
-        con = _get_connection()
-        try:
-            rows = con.execute("SELECT DISTINCT player FROM players_matches").fetchall()
-        finally:
-            con.close()
-        _player_names_cache = [r[0] for r in rows if r[0]]
-    return _player_names_cache
-
-
-def _load_tournament_names() -> list[str]:
-    global _tournament_names_cache
-    if _tournament_names_cache is None:
-        con = _get_connection()
-        try:
-            rows = con.execute(
-                "SELECT DISTINCT event_name FROM matches WHERE event_name IS NOT NULL"
-            ).fetchall()
-        finally:
-            con.close()
-        _tournament_names_cache = [r[0] for r in rows if r[0]]
-    return _tournament_names_cache
-
-
-def invalidate_name_caches() -> None:
-    """Call after re-ingesting the DB so the next lookup picks up fresh names."""
-    global _player_names_cache, _tournament_names_cache
-    _player_names_cache = None
-    _tournament_names_cache = None
-
-
-def warm_name_caches() -> None:
-    """Populate both caches eagerly (called on FastAPI startup) so the first
-    user-facing search_player/search_tournament call isn't slowed by a cold
-    cache."""
-    _load_player_names()
-    _load_tournament_names()
-
-
 def search_player(name: str, limit: int = 5) -> list[str]:
     """
-    Fuzzy-matches a player name against names actually present in the database.
-    Cricsheet spells names inconsistently across sources (e.g. "V Kohli" vs
-    "Virat Kohli" vs "Kohli V"), so the agent should call this before writing
-    a WHERE clause on a player name, then use the returned exact string.
+    Best-matching player names for `name`, most likely first. Understands
+    Cricsheet's initials convention ("Rohit Sharma" -> "RG Sharma") and
+    ranks namesakes by how much they've played -- see catalog.py. Used by
+    the frontend's autocomplete.
     """
-    names = _load_player_names()
+    from . import catalog
 
-    matches = get_close_matches(name, names, n=limit, cutoff=0.4)
-    if not matches:
-        # fall back to a simple substring search (handles partial/last-name queries)
-        lowered = name.lower()
-        matches = [n for n in names if lowered in n.lower()][:limit]
-    return matches
+    return [p.name for _, _, p in catalog.rank_players(name, limit=limit)]
 
 
-# Common abbreviations that won't fuzzy-match their full names (e.g. "IPL"
-# vs "Indian Premier League" share almost no characters, so difflib alone
-# can't bridge that gap). Extend this as you notice the agent guess wrong.
-_TOURNAMENT_ALIASES = {
-    "ipl": "Indian Premier League",
-    "bbl": "Big Bash League",
-    "psl": "Pakistan Super League",
-    "cpl": "Caribbean Premier League",
-    "bpl": "Bangladesh Premier League",
-    "t20 wc": "ICC Men's T20 World Cup",
-    "t20 world cup": "ICC Men's T20 World Cup",
-    "world cup": "ICC Cricket World Cup",
-    "the hundred": "The Hundred",
-}
+def warm_caches() -> None:
+    """Load the name catalog eagerly (called on FastAPI startup) so the
+    first user-facing query isn't slowed by a cold cache."""
+    from . import catalog
+
+    catalog.get_catalog()
 
 
-def search_tournament(name: str, limit: int = 5) -> list[str]:
-    """
-    Resolves a tournament/competition name to the exact event_name string(s)
-    used in the database. ALWAYS call this before filtering matches.event_name
-    -- common abbreviations (e.g. "IPL") don't fuzzy-match their full names
-    (e.g. "Indian Premier League") by string similarity, and getting this
-    wrong silently returns zero rows rather than an error, which can lead to
-    an incorrect "no data found" conclusion.
-    """
-    names = _load_tournament_names()
+def invalidate_caches() -> None:
+    """Call after re-ingesting the DB so the next lookup picks up fresh names."""
+    from . import catalog
 
-    lowered = name.strip().lower()
-    if lowered in _TOURNAMENT_ALIASES:
-        alias_target = _TOURNAMENT_ALIASES[lowered]
-        if alias_target in names:
-            return [alias_target]
+    catalog.invalidate()
 
-    matches = get_close_matches(name, names, n=limit, cutoff=0.4)
-    if not matches:
-        matches = [n for n in names if lowered in n.lower()][:limit]
-    return matches
+
+# Handed to the model in run_sql's description: the schema plus the traps
+# that make hand-written cricket SQL silently wrong.
+SQL_GUIDE = """Tables (DuckDB):
+- matches(match_id, match_type, event_name, match_number, gender, team_type, overs_per_innings, date TEXT 'YYYY-MM-DD', venue, city, season TEXT, team1, team2, toss_winner, toss_decision, winner, win_by_runs, win_by_wickets, player_of_match)
+- deliveries(match_id, innings_num, batting_team, over_num (0-indexed), ball_in_over, batter, bowler, non_striker, runs_batter, runs_extras, runs_total, extra_type, is_wicket, wicket_kind, player_dismissed)
+- players_matches(match_id, team, player)
+Rules: match_type 'T20' + team_type 'international' = T20Is ('IT20' = non-official internationals); 'ODM'/'MDM' = domestic one-day/multi-day. winner NULL = tie/draw/no result. gender is 'male'/'female' and team names are the same for both (always filter gender). Innings > 2 in limited-overs matches are super overs -- exclude them. A wide is not a ball faced; wides/no-balls are not legal balls; byes/leg-byes are not charged to the bowler; 'retired hurt' is not a dismissal; run outs are not bowler wickets. Player names use Cricsheet form ('V Kohli', 'RG Sharma'), and competitions can span several event_name values -- prefer the stats tools, which handle all of this."""
 
 
 def get_stats() -> dict:

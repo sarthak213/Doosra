@@ -1,8 +1,12 @@
 const SUGGESTIONS = [
-  "Who has scored the most runs in the Indian Premier League?",
-  "Compare Virat Kohli's strike rate in the IPL vs T20 internationals",
-  "Which team has won the most matches at Eden Gardens?",
-  "Who has taken the most wickets in T20 World Cups?",
+  "Who has scored the most runs in the IPL?",
+  "How has Jos Buttler's IPL batting trended season by season?",
+  "Who has the best death-overs economy in the IPL?",
+  "Compare Babar Azam and Mohammad Rizwan in T20Is",
+  "India vs Australia head to head in Tests",
+  "Who gets Steve Smith out most in Tests?",
+  "Is Chinnaswamy a chasing ground in the IPL?",
+  "Most wickets in the Women's Premier League",
 ];
 
 export default function SuggestedQuestions({ onPick }) {

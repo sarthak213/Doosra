@@ -13,6 +13,7 @@ function makeTurn(question) {
     question,
     steps: [],
     charts: [],
+    tables: [],
     finalAnswer: null,
     chartData: null,
     tableData: null,
@@ -73,7 +74,9 @@ export function useAgentQuery() {
       const requestId = crypto.randomUUID();
       requestIdRef.current = requestId;
 
-      const history = turnsRef.current.flatMap((t) => [
+      // Only the last few turns: enough for follow-ups ("what about in
+      // Tests?"), without bloating the URL or the model's context.
+      const history = turnsRef.current.slice(-4).flatMap((t) => [
         { role: "user", content: t.question },
         ...(t.finalAnswer ? [{ role: "assistant", content: t.finalAnswer }] : []),
       ]);
@@ -104,6 +107,14 @@ export function useAgentQuery() {
           // mid-reasoning, not just tacked onto the final answer. A turn
           // can have multiple (one per sub-comparison), rendered in order.
           updateLastTurn((t) => ({ ...t, charts: [...t.charts, event.chart_data] }));
+        } else if (event.type === "table") {
+          // Tool results with rows arrive as tables the moment they're
+          // computed -- the numbers the user sees come straight from the
+          // stats engine, not from the model's paraphrase.
+          updateLastTurn((t) => ({
+            ...t,
+            tables: [...(t.tables || []), { id: event.table_id, ...event.table_data }],
+          }));
         } else if (event.type === "error") {
           updateLastTurn((t) => ({ ...t, error: event.content }));
         } else if (event.type === "thought" && !event.content?.trim()) {

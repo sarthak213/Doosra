@@ -24,7 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent import stats, tools  # noqa: E402
+from agent import tools  # noqa: E402
 from ingest import build_db  # noqa: E402
 
 
@@ -110,7 +110,8 @@ MATCH_A = {
                         # Leg-bye: batter faces it, bowler NOT charged.
                         _delivery("H Pandya", "A Zampa", runs_extras=1, extras={"legbyes": 1}, non_striker="A Patel"),
                         _delivery("H Pandya", "A Zampa", runs_batter=2, non_striker="A Patel"),
-                        # Retired hurt: a dismissal, not a bowler wicket.
+                        # Retired hurt: NOT a dismissal (the batter isn't
+                        # out) and not a bowler wicket.
                         _delivery(
                             "H Pandya", "A Zampa",
                             wickets=[{"kind": "retired hurt", "player_out": "H Pandya"}], non_striker="A Patel",
@@ -278,13 +279,44 @@ def fixture_db_path(tmp_path_factory):
     return db_path
 
 
-@pytest.fixture(autouse=True)
-def use_fixture_db(monkeypatch, fixture_db_path):
-    """Points every tools/stats query at the fixture DB and resets the
-    in-process caches so a test that ran earlier against another DB can't
-    leak stale schema/name caches into this one."""
-    monkeypatch.setattr(tools, "DB_PATH", fixture_db_path)
-    monkeypatch.setattr(tools, "_player_names_cache", None)
-    monkeypatch.setattr(tools, "_tournament_names_cache", None)
-    monkeypatch.setattr(stats, "_delivery_columns_cache", None)
-    yield
+@pytest.fixture(scope="session")
+def old_schema_db_path(fixture_db_path, tmp_path_factory):
+    """The same matches in the OLDER schema (single extra_type string, no
+    per-type extra columns, no deliveries_wickets table) -- the shape of a
+    database built before the ingest change, which the stats code must keep
+    handling. A ball with several extras keeps only its first key, like the
+    old ingest did."""
+    import duckdb
+
+    db_path = tmp_path_factory.mktemp("old") / "old_schema.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(f"ATTACH '{fixture_db_path}' AS src (READ_ONLY)")
+        con.execute("CREATE TABLE matches AS SELECT * FROM src.matches")
+        con.execute("CREATE TABLE players_matches AS SELECT * FROM src.players_matches")
+        con.execute(
+            """
+            CREATE TABLE deliveries AS
+            SELECT match_id, innings_num, batting_team, over_num, ball_in_over, batter, bowler, non_striker,
+                   runs_batter, runs_extras, runs_total,
+                   CASE WHEN extra_noballs IS NOT NULL THEN 'noballs'
+                        WHEN extra_wides IS NOT NULL THEN 'wides' ELSE extra_type END AS extra_type,
+                   is_wicket, wicket_kind, player_dismissed
+            FROM src.deliveries
+            """
+        )
+        con.execute("DETACH src")
+    finally:
+        con.close()
+    return db_path
+
+
+@pytest.fixture(autouse=True, params=["new", "old"])
+def schema(request, monkeypatch, fixture_db_path, old_schema_db_path):
+    """Runs every test against both database schemas, pointing all queries
+    at the matching fixture DB. The name catalog is cached per database path,
+    so the two can't leak into each other. Yields "new" or "old" so a test
+    can assert the (documented) differences between them."""
+    path = fixture_db_path if request.param == "new" else old_schema_db_path
+    monkeypatch.setattr(tools, "DB_PATH", path)
+    yield request.param
