@@ -77,6 +77,25 @@ def test_options_and_metrics(client):
     assert {"true_sr", "match_factor"} <= ids
 
 
+def test_fibs_endpoints(client):
+    r = client.get("/api/fibs/report", params={"format": "T20", "gender": "male", "role": "bowling"})
+    assert r.status_code == 200 and r.json()["findings"]
+    r = client.get("/api/fibs/pairs", params={"metric": "dot", "role": "batting"})
+    assert r.status_code == 200 and r.json()["columns"][:2] == ["player", "yr"]
+    assert client.get("/api/fibs/pairs", params={"metric": "nope"}).status_code == 400
+    r = client.get("/api/fibs/luck", params={"role": "bowling", "min_balls": 1, "season": "latest"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "wicket_luck" in body["columns"] and body["title"].startswith("Luckiest bowlers")
+
+
+def test_coverage_endpoints_explain_missing_tables(client):
+    # The fixture databases are built without Cricsheet's coverage pages.
+    r = client.get("/api/coverage")
+    assert r.status_code == 400 and "ingest.update" in r.json()["error"]
+    assert client.get("/api/coverage/missing", params={"format": "Test"}).status_code == 400
+
+
 def test_chat_stream_with_context(client, monkeypatch):
     seen = {}
 

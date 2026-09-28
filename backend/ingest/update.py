@@ -5,7 +5,8 @@ steps the weekly GitHub Actions job runs, without needing a release.
     python -m ingest.update               # download, build, validate, install
     python -m ingest.update --no-download # rebuild from the files already in data/raw
 
-Downloads all_json.zip, people.csv and names.csv into data/raw, builds into
+Downloads all_json.zip, people.csv, names.csv and Cricsheet's coverage /
+missing-match pages into data/raw, builds into
 data/.build/cricket.duckdb, builds the derived tables, runs the validation
 gate, and only then swaps the result in for data/cricket.duckdb (the previous
 file is kept as cricket.duckdb.bak). Stop the API first.
@@ -19,13 +20,14 @@ import urllib.request
 from pathlib import Path
 
 from analytics import build as analytics_build
-from ingest import build_db, validate
+from ingest import build_db, coverage, validate
 from ingest.pull import TARGET, PullError, install
 
 SOURCES = {
     "all_json.zip": "https://cricsheet.org/downloads/all_json.zip",
     "people.csv": "https://cricsheet.org/register/people.csv",
     "names.csv": "https://cricsheet.org/register/names.csv",
+    **coverage.FILES,
 }
 
 

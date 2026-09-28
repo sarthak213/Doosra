@@ -50,6 +50,43 @@ _BOWL_ECON = f"6.0 * {_avg('SUM(m.runs)', 'SUM(m.balls)')}"
 _BOWL_XECON = f"6.0 * {_avg('SUM(m.exp_runs)', 'SUM(m.balls)')}"
 _BOWL_AVG = _avg("SUM(m.runs)", "SUM(m.wickets)")
 
+
+def _k(col: str, den: str) -> str:
+    """A reliability constant (K, from the FIBS study) for the rows in scope:
+    K varies by format, so mixed formats get the sample-weighted mean."""
+    return f"(SUM(m.{den} * m.{col}) / NULLIF(SUM(m.{den}), 0))"
+
+
+def _regressed(num: str, exp: str, den: str, k: str) -> str:
+    """Observed rate shrunk toward the situation-expected rate by K balls:
+    (sum(x) + K * expected rate) / (sum(n) + K)."""
+    return (f"(SUM(m.{num}) + {_k(k, den)} * {_avg(f'SUM(m.{exp})', f'SUM(m.{den})')}) "
+            f"/ NULLIF(SUM(m.{den}) + {_k(k, den)}, 0)")
+
+
+def _skill_count(num: str, exp: str, den: str, k: str) -> str:
+    """How many of an outcome the player's skill accounts for: their rate
+    regressed toward expected by K, times their sample."""
+    return f"(SUM(m.{den}) * {_regressed(num, exp, den, k)})"
+
+
+# Fielding-Independent figures keep the outcomes that are the player's own
+# and replace the two that fielding and luck affect most -- catches in the
+# field, and runs off scoring shots in play -- with the player's skill-level
+# estimate of them (their own rate, regressed by the K the FIBS study
+# measured). What's left over is luck.
+_SKILL_CT_BOWL = _skill_count("n_ct_field", "x_ct_field", "deliveries", "k_ct_field")
+_SKILL_CT_BAT = _skill_count("n_ct_field", "x_ct_field", "balls", "k_ct_field")
+_SKILL_INPLAY = _skill_count("inplay_runs", "x_inplay_runs", "n_inplay", "k_inplay_runs")
+_FIB_WKTS = f"(SUM(m.wickets) - SUM(m.n_ct_field) + {_SKILL_CT_BOWL})"
+_FIB_OUTS = f"(SUM(m.out) - SUM(m.n_ct_field) + {_SKILL_CT_BAT})"
+_FIB_RUNS = f"(SUM(m.runs) - SUM(m.inplay_runs) + {_SKILL_INPLAY})"
+_REG_BOWL_RUNS = _regressed("runs", "exp_runs", "balls", "k_runs")
+_REG_BOWL_WKTS = _regressed("wickets", "exp_wkts", "balls", "k_wickets")
+_REG_BAT_RUNS = _regressed("runs", "exp_runs", "balls", "k_runs")
+_REG_BAT_OUTS = _regressed("out", "exp_outs", "balls", "k_outs")
+_FIBS = " See the FIBS methodology page."
+
 METRICS: tuple[Metric, ...] = (
     # ---- batting: traditional ------------------------------------------------
     Metric("matches", "Matches", BAT, "traditional", "COUNT(DISTINCT m.match_id)",
@@ -133,6 +170,40 @@ METRICS: tuple[Metric, ...] = (
     Metric("true_first5_sr", "True first-5-ball SR", BAT, "context",
            f"100.0 * {_avg('SUM(m.runs_first5) - SUM(m.exp_runs_first5)', 'SUM(m.balls_first5)')}",
            "First-five-ball strike rate above an average batter facing those same balls.", phase_ok=False, rate=True),
+    # ---- batting: FIBS -------------------------------------------------
+    Metric("fib_average", "FIB average", BAT, "fielding-independent",
+           _avg(_FIB_RUNS, _FIB_OUTS),
+           "Batting average with the two outcomes fielding and luck affect most -- runs off scoring shots in play "
+           "(not boundaries) and catches in the field -- replaced by the batter's skill-level rates for them "
+           "(their own rates regressed to the situation average by how reliable each is)." + _FIBS,
+           phase_ok=False, rate=True),
+    Metric("fib_sr", "FIB strike rate", BAT, "fielding-independent", f"100.0 * {_avg(_FIB_RUNS, 'SUM(m.balls)')}",
+           "Strike rate with runs off scoring shots in play replaced by the batter's skill-level rate for "
+           "them." + _FIBS, phase_ok=False, rate=True),
+    Metric("runs_luck", "Runs luck", BAT, "fielding-independent", f"SUM(m.runs) - {_FIB_RUNS}",
+           "Runs off scoring shots in play beyond what the batter's skill accounts for. Positive = the gaps and "
+           "the fielders were kind." + _FIBS, phase_ok=False),
+    Metric("dismissal_luck", "Dismissal luck", BAT, "fielding-independent", f"{_FIB_OUTS} - SUM(m.out)",
+           "Catches in the field the batter's skill accounts for minus the catches actually taken off them. "
+           "Positive = caught less often than their game deserved." + _FIBS, phase_ok=False),
+    Metric("regressed_sr", "Regressed strike rate", BAT, "reliability-adjusted", f"100.0 * {_REG_BAT_RUNS}",
+           "Strike rate shrunk toward the situation-expected strike rate by K balls, K being how many balls it "
+           "takes for scoring rate to be half skill, half noise -- a fair estimate from small samples." + _FIBS,
+           phase_ok=False, rate=True),
+    Metric("regressed_average", "Regressed average", BAT, "reliability-adjusted",
+           f"({_REG_BAT_RUNS}) / NULLIF({_REG_BAT_OUTS}, 0)",
+           "Average from scoring rate and dismissal rate each shrunk toward the situation-expected rates by "
+           "their own K. Short careers are pulled toward average; long ones barely move." + _FIBS,
+           phase_ok=False, rate=True),
+    Metric("regressed_dot_pct", "Regressed dot %", BAT, "reliability-adjusted",
+           f"100.0 * {_regressed('n_dot', 'x_dot', 'balls', 'k_dot')}",
+           "Dot-ball percentage shrunk toward the situation-expected rate by K balls." + _FIBS,
+           higher_is_better=False, phase_ok=False, rate=True, kind="pct"),
+    Metric("regressed_boundary_pct", "Regressed boundary %", BAT, "reliability-adjusted",
+           f"100.0 * (SUM(m.n_four) + SUM(m.n_six) + {_k('k_boundary', 'balls')} * "
+           f"{_avg('SUM(m.x_four) + SUM(m.x_six)', 'SUM(m.balls)')}) / NULLIF(SUM(m.balls) + {_k('k_boundary', 'balls')}, 0)",
+           "Boundary percentage shrunk toward the situation-expected rate by K balls." + _FIBS,
+           phase_ok=False, rate=True, kind="pct"),
     # ---- batting: role & situation -------------------------------------------
     Metric("avg_position", "Avg batting position", BAT, "role", "AVG(m.position)",
            "Average position in the order (1 = opener).", higher_is_better=False, phase_ok=False),
@@ -195,6 +266,64 @@ METRICS: tuple[Metric, ...] = (
            f"({_avg('SUM(m.mc_runs)', 'SUM(m.mc_wkts)')}) / NULLIF({_BOWL_AVG}, 0)",
            "Average of every other bowler in the same matches divided by this bowler's average. "
            "1.0 = par for the conditions; above 1 = better.", phase_ok=False, rate=True),
+    # ---- bowling: FIBS -------------------------------------------------
+    Metric("fib_economy", "FIB economy", BOWL, "fielding-independent", f"6.0 * {_avg(_FIB_RUNS, 'SUM(m.balls)')}",
+           "Fielding-Independent Bowling: economy with runs off scoring shots in play (not boundaries) replaced by "
+           "the bowler's skill-level rate for them -- their own rate regressed to the situation average by how "
+           "reliable it is. Dots, boundaries and extras stay the bowler's own." + _FIBS,
+           higher_is_better=False, phase_ok=False, rate=True),
+    Metric("fib_wickets", "FIB wickets", BOWL, "fielding-independent", _FIB_WKTS,
+           "Wickets with catches in the field replaced by the bowler's skill-level number of them; bowled, lbw, "
+           "caught behind, caught and bowled and stumped stay the bowler's own." + _FIBS, phase_ok=False),
+    Metric("fib_average", "FIB average", BOWL, "fielding-independent", _avg(_FIB_RUNS, _FIB_WKTS),
+           "Bowling average from FIB runs and FIB wickets." + _FIBS, higher_is_better=False, phase_ok=False,
+           rate=True),
+    Metric("fib_strike_rate", "FIB strike rate", BOWL, "fielding-independent", _avg("SUM(m.balls)", _FIB_WKTS),
+           "Balls per FIB wicket." + _FIBS, higher_is_better=False, phase_ok=False, rate=True),
+    Metric("wicket_luck", "Wicket luck", BOWL, "fielding-independent", f"SUM(m.n_ct_field) - {_SKILL_CT_BOWL}",
+           "Wickets minus FIB wickets: catches in the field beyond what the bowler's skill accounts for. "
+           "Positive = more catches than their bowling deserved (edges went to hand, catches stuck)." + _FIBS,
+           phase_ok=False),
+    Metric("runs_luck", "Runs luck", BOWL, "fielding-independent", f"{_FIB_RUNS} - SUM(m.runs)",
+           "FIB runs minus runs conceded: runs saved off scoring shots in play beyond what the bowler's skill "
+           "accounts for. Positive = the gaps and the fielders helped." + _FIBS, phase_ok=False),
+    Metric("inplay_runs_per_shot", "Runs per scoring shot in play", BOWL, "fielding-independent",
+           _avg("SUM(m.inplay_runs)", "SUM(m.n_inplay)"),
+           "Average runs off each non-boundary scoring shot -- cricket's version of baseball's batting average "
+           "on balls in play." + _FIBS, higher_is_better=False, rate=True),
+    Metric("bowled_lbw_pct", "Bowled + LBW %", BOWL, "dismissal profile",
+           f"100.0 * {_avg('SUM(m.n_bowled) + SUM(m.n_lbw)', 'SUM(m.deliveries)')}",
+           "Bowled and lbw dismissals per 100 deliveries: wickets the bowler takes without a fielder.",
+           rate=True, kind="pct"),
+    Metric("caught_behind_pct", "Caught behind %", BOWL, "dismissal profile",
+           f"100.0 * {_avg('SUM(m.n_ct_keeper)', 'SUM(m.deliveries)')}",
+           "Catches by the wicketkeeper per 100 deliveries (the keeper is inferred from stumpings)." + _FIBS,
+           rate=True, kind="pct"),
+    Metric("caught_field_pct", "Caught in the field %", BOWL, "dismissal profile",
+           f"100.0 * {_avg('SUM(m.n_ct_field)', 'SUM(m.deliveries)')}",
+           "Catches by fielders other than the keeper and the bowler, per 100 deliveries.", rate=True, kind="pct"),
+    Metric("regressed_economy", "Regressed economy", BOWL, "reliability-adjusted", f"6.0 * {_REG_BOWL_RUNS}",
+           "Economy shrunk toward the situation-expected economy by K balls, K being how many balls it takes for "
+           "economy to be half skill, half noise -- a fair estimate from small samples." + _FIBS,
+           higher_is_better=False, phase_ok=False, rate=True),
+    Metric("regressed_strike_rate", "Regressed strike rate", BOWL, "reliability-adjusted",
+           f"1.0 / NULLIF({_REG_BOWL_WKTS}, 0)",
+           "Balls per wicket from a wicket rate shrunk toward the expected rate by K balls. Wicket rates need "
+           "thousands of balls to mean much, so this moves a lot." + _FIBS,
+           higher_is_better=False, phase_ok=False, rate=True),
+    Metric("regressed_average", "Regressed average", BOWL, "reliability-adjusted",
+           f"({_REG_BOWL_RUNS}) / NULLIF({_REG_BOWL_WKTS}, 0)",
+           "Bowling average from economy and wicket rate each shrunk toward the expected rates by their own K."
+           + _FIBS, higher_is_better=False, phase_ok=False, rate=True),
+    Metric("regressed_dot_pct", "Regressed dot %", BOWL, "reliability-adjusted",
+           f"100.0 * {_regressed('n_dot', 'x_dot', 'deliveries', 'k_dot')}",
+           "Dot-ball percentage (of deliveries) shrunk toward the expected rate by K balls." + _FIBS,
+           phase_ok=False, rate=True, kind="pct"),
+    Metric("regressed_boundary_pct", "Regressed boundary %", BOWL, "reliability-adjusted",
+           f"100.0 * (SUM(m.n_four) + SUM(m.n_six) + {_k('k_boundary', 'deliveries')} * "
+           f"{_avg('SUM(m.x_four) + SUM(m.x_six)', 'SUM(m.deliveries)')}) / NULLIF(SUM(m.deliveries) + {_k('k_boundary', 'deliveries')}, 0)",
+           "Boundary percentage (of deliveries) shrunk toward the expected rate by K balls." + _FIBS,
+           higher_is_better=False, phase_ok=False, rate=True, kind="pct"),
     Metric("team_win_pct", "Team win %", BOWL, "role",
            "100.0 * " + _avg("SUM(CAST(m.result = 'won' AS INTEGER))", "SUM(CAST(m.result <> 'no result' AS INTEGER))"),
            "Share of decided games their team won when they bowled.", phase_ok=False, kind="pct"),

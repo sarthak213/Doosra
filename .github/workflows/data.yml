@@ -46,6 +46,10 @@ jobs:
           curl -fsSL --retry 3 -o data/raw/all_json.zip https://cricsheet.org/downloads/all_json.zip
           curl -fsSL --retry 3 -o data/raw/people.csv https://cricsheet.org/register/people.csv
           curl -fsSL --retry 3 -o data/raw/names.csv https://cricsheet.org/register/names.csv
+          # Coverage and known-missing matches (web pages; ingest/coverage.py parses them)
+          for p in coverage missing matches; do
+            curl -fsSL --retry 3 -o "data/raw/cricsheet_$p.html" "https://cricsheet.org/$p/"
+          done
           sha256sum data/raw/*
 
       - name: Build database

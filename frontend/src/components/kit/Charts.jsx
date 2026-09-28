@@ -86,7 +86,8 @@ export function LineChartKit({ data, x, series, references = [], height = 280, x
 // Every qualified player as a point; medians split the plane into quadrants.
 // Points are neutral; watchlisted players are brass, the selected one blue.
 export function ScatterMatrix({ points, xKey, yKey, xLabel, yLabel, medians, highlighted = [], selected, onSelect,
-  standouts = [], xBetterHigh = true, yBetterHigh = true, height = 460 }) {
+  standouts = [], xBetterHigh = true, yBetterHigh = true, height = 460, medianLabel = "median",
+  pointLabel = "Qualified players" }) {
   if (!points?.length) return null;
   // Standouts (best on both axes) stay neutral but get a name label.
   const named = points.filter((p) => standouts.includes(p.player) && !highlighted.includes(p.player) && p.player !== selected);
@@ -108,7 +109,7 @@ export function ScatterMatrix({ points, xKey, yKey, xLabel, yLabel, medians, hig
   };
   return (
     <div className="chart-block">
-      <Legend items={[{ label: "Qualified players", color: NEUTRAL_POINT }, ...(hl.length ? [{ label: "Watchlist", color: SERIES[0] }] : []),
+      <Legend items={[{ label: pointLabel, color: NEUTRAL_POINT }, ...(hl.length ? [{ label: "Watchlist", color: SERIES[0] }] : []),
         ...(sel.length ? [{ label: selected, color: SERIES[1] }] : [])]} />
       <ResponsiveContainer width="100%" height={height}>
         <ScatterChart margin={{ top: 16, right: 96, bottom: 28, left: 8 }}>
@@ -121,7 +122,7 @@ export function ScatterMatrix({ points, xKey, yKey, xLabel, yLabel, medians, hig
           <Tooltip content={tip} cursor={{ strokeDasharray: "3 3", stroke: "rgba(241,232,214,0.25)" }} />
           {medians?.x != null && <ReferenceLine x={medians.x} stroke="rgba(241,232,214,0.3)" strokeDasharray="4 4" />}
           {medians?.y != null && <ReferenceLine y={medians.y} stroke="rgba(241,232,214,0.3)" strokeDasharray="4 4"
-            label={{ value: "median", position: "insideTopLeft", fill: AXIS_TEXT, fontSize: 11 }} />}
+            label={{ value: medianLabel, position: "insideTopLeft", fill: AXIS_TEXT, fontSize: 11 }} />}
           <Scatter data={base} fill={NEUTRAL_POINT} onClick={(p) => onSelect?.(p.player)} isAnimationActive={false} />
           <Scatter data={named} fill="rgba(241, 232, 214, 0.7)" onClick={(p) => onSelect?.(p.player)} isAnimationActive={false}
             label={{ dataKey: "player", position: "right", fill: AXIS_TEXT, fontSize: 11, offset: 8 }} />

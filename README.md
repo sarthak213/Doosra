@@ -17,6 +17,7 @@ published as a release the app downloads.
 backend/
 ├── ingest/                 # the data pipeline
 │   ├── build_db.py         #   Cricsheet zip/JSON + register -> DuckDB tables (batched)
+│   ├── coverage.py         #   Cricsheet's coverage + missing-match pages -> tables
 │   ├── validate.py         #   release gate: schema, counts, invariants, frozen careers
 │   ├── manifest.py         #   release manifest (hashes, counts, build date)
 │   ├── pull.py             #   download + verify + install the published database
@@ -26,6 +27,9 @@ backend/
 │   ├── catalog.py          #   name resolution: players, competitions, teams, venues, formats
 │   ├── scope.py            #   shared filters -> SQL, and the per-ball scoring rules
 │   ├── build.py            #   derived per-innings tables + ball-state expectations
+│   ├── components.py       #   the per-ball outcome taxonomy (FIBS)
+│   ├── fibs.py             #   the FIBS study: what's skill, what's luck
+│   ├── coverage.py         #   what the data covers and what it's missing
 │   ├── registry.py         #   the metric registry: every metric declared once
 │   ├── engine.py           #   query builder: stats, splits, form, arcs, percentiles, matrix...
 │   └── results.py          #   the result envelope + formatting/highlight helpers
@@ -40,7 +44,7 @@ backend/
 ├── tests/                  # pytest suite (both DB schemas) + eval questions
 └── main.py                 # FastAPI app: /api, /mcp, SSE chat streams
 
-frontend/                   # React app: Player Hub, Compare, Query, Matrix, Ask + copilot drawer
+frontend/                   # React app: Player Hub, Compare, Query, Matrix, FIBS, Data, Ask + copilot drawer
 ```
 
 The UI, the copilot and external MCP clients all go through the same engine,
@@ -75,10 +79,21 @@ file in place (the previous one is kept as `data/cricket.duckdb.bak`).
 `python -m ingest.pull --check` says whether a newer build is out; the app
 footer shows which build you're running.
 
+## What the data covers
+
+Cricsheet publishes, as web pages, the periods it covers, how many matches it
+holds of each competition and team, and a list of every match it knows it's
+missing (about 2,900: roughly 10% of men's Tests and ODIs since 2001, and more
+of women's cricket). It also withholds every match involving Afghanistan.
+`ingest/coverage.py` parses those pages into tables each build
+(`coverage_periods`, `coverage_counts`, `missing_matches`, `coverage_info`);
+the Data page, the player notes and the `data_coverage` MCP tool read them,
+so the copilot can explain why a total is short of the official record.
+
 ## The data pipeline
 
 ```text
-Cricsheet all_json.zip + register (people.csv, names.csv)
+Cricsheet all_json.zip + register (people.csv, names.csv) + coverage/missing pages
   -> ingest/build_db.py        raw tables: matches, deliveries, wickets, XIs, people
   -> python -m analytics.build derived per-innings tables and expectations
   -> ingest/validate.py        the release gate (below)
@@ -96,6 +111,9 @@ The validation gate fails the release if:
 - any table shrank against the previous release;
 - runs in the per-innings table don't match the ball-by-ball runs exactly,
   super-over innings leak in, or runs above expected doesn't sum to ~0;
+- FIBS's expected outfield catches don't balance the observed ones;
+- Cricsheet's coverage / missing-match pages were downloaded but parsed to
+  nothing (the page layout changed) -- rather than ship an empty Data page;
 - a retired player's career changed. `ingest/frozen_careers.json` holds
   totals for Tendulkar, Dravid, Kumble, Kallis, Sangakkara, Jayawardene,
   Muralitharan, Malinga, Steyn, de Villiers, McCullum, Hafeez, Mithali Raj
@@ -127,12 +145,27 @@ python -m ingest.validate
   export, click through to players.
 - **Player Matrix** (`/matrix`) — every qualified player on two metrics,
   medians as quadrant lines, standouts labelled, watchlist in brass.
+- **FIBS** (`/methodology/fibs`) — the Fielding-Independent Bowling Statistics methodology page:
+  what's skill and what's luck in a cricket record, with every number,
+  chart and finding read live from the study (see below). Luckiest and
+  unluckiest players for any competition and season.
+- **Data coverage** (`/data`) — what the data covers and what it doesn't:
+  matches per format since when, Cricsheet's coverage by competition and
+  team, every known-missing match (filterable), and the matches Cricsheet
+  withholds. Player Hub pages flag gaps during a player's career.
 - **Ask** (`/ask`) — full-page chat.
 - **Copilot drawer** (Ctrl+K, on every view) — knows what you're looking at;
   every panel has an **Explain** button, and it can open views with settings
   filled in ("show me the best death bowlers since 2022 in the query builder").
 
 Every view keeps its settings in the URL, so any view is a shareable permalink.
+
+Every view shares one set of filters: competition, format, gender, team,
+opposition, venue, season, year range, phase and innings. Innings follows the
+format: Tests and first-class matches have four (3rd and 4th are each side's
+second innings), limited overs have two (setting, chasing). Season also takes
+`latest` -- the most recent season of whatever else is filtered ("this IPL").
+Competition, team and venue inputs suggest as you type.
 
 ## Metrics
 
@@ -151,10 +184,52 @@ plain-English definition (shown in the UI and given to the model). Highlights:
 - Scoring profile (dot %, boundary %, balls per boundary...), reliability
   (conversion rate, 30+ rate, median, variability), role (position, entry point).
 - Fielding: catches, stumpings and run-outs, per player and as leaderboards.
+- **FIBS** (Fielding-Independent Bowling Statistics) — FIB economy, average and wickets,
+  wicket luck and runs luck, and reliability-adjusted ("regressed") figures.
+  See the next section.
 
 These adjust for match situation, not opposition or pitch quality. Cricsheet
 has no ball tracking or player attributes, so pace-vs-spin, handedness and
 line/length analysis aren't available.
+
+## FIBS: Fielding-Independent Bowling Statistics
+
+FIBS is an attempt at a cricket framework analogous to baseball's DIPS
+(Defense-Independent Pitching Statistics). DIPS (Voros McCracken, 2001)
+showed that pitchers barely control whether a ball in play becomes a hit,
+so part of every pitcher's record is fielding and luck. FIBS asks the same
+question of cricket -- for bowlers, and for batters as the mirror image --
+without assuming baseball's answer. `analytics/fibs.py` runs it as a study
+over the whole database at every build:
+
+- Every ball is broken into outcomes (`analytics/components.py`): dots,
+  fours, sixes, wides, no-balls, scoring shots in play, bowled, lbw, caught
+  by the keeper, caught in the field, caught and bowled, stumped, run out.
+  Each has an expected rate for every ball state, so everything is measured
+  *above expected*. Caught behind uses an inferred keeper (the XI member who
+  made a stumping in the match, otherwise the one with most career
+  stumpings).
+- **Stability**: each player-season is split in two by match; the covariance
+  of the halves across players estimates the true-talent spread, giving
+  **K** -- the balls at which a rate is half skill, half noise
+  (reliability over n balls = n / (n + K)). Year-to-year correlations are
+  the cross-check.
+- **Prediction**: out of sample, which of this season's figures best
+  predicts next season's economy and wicket rate -- raw, regressed,
+  DIPS-style (fielding-affected outcomes replaced by the league average) or
+  luck-adjusted.
+
+What it finds (men's T20, current data): dot % and economy settle within a
+couple of hundred deliveries, but wicket rate needs about 1,700 -- a typical
+season's wicket rate is roughly 90% noise. Unlike baseball, catches in the
+field are about as repeatable as bowled and lbw, and the DIPS-style
+replacement predicts next season *worse* than the raw figures. So Doosra's FIB and luck metrics
+don't discard those outcomes: they shrink each player's own rate by its
+measured K, and call what's left over luck.
+
+The results live in `fibs_stability` and `fibs_prediction`; every innings
+row carries the K for its format and gender. The copilot uses them through
+the `fibs_report` and `luck_leaderboard` tools.
 
 ## How answers stay correct
 
@@ -202,7 +277,7 @@ wrong tool more often.
 
 ## Using the tools from other apps (MCP)
 
-Any app that speaks the Model Context Protocol can use the same 18 tools. The
+Any app that speaks the Model Context Protocol can use the same 21 tools. The
 server offers two transports:
 
 | Transport | Endpoint | Needs the API running? | Use when |
@@ -301,7 +376,7 @@ cancellation registry are per-process; a public deployment needs shared ones.
 
 ```bash
 cd backend
-pytest                  # ~440 tests: ingest, release pipeline, scoring rules, engine, API, MCP, agent graph
+pytest                  # ~530 tests: ingest, release pipeline, coverage, scoring rules, FIBS, engine, API, MCP, agent graph
 pytest -m llm           # LLM-in-the-loop eval (needs a model endpoint)
 ```
 
@@ -309,7 +384,9 @@ The fixture tests build a small synthetic database through the real ingest
 and analytics-build path, and run against **both** database schemas (the
 current one and the older one without `deliveries_wickets`). Context metrics
 are also checked against invariants that hold by construction (runs above
-expected sum to zero across all batters). The agent graph is tested with a
+expected sum to zero across all batters). The FIBS estimator is checked on
+simulated players with known true rates (it must recover K), and the coverage
+parser on pages shaped like Cricsheet's. The agent graph is tested with a
 scripted fake LLM against the real MCP tools.
 
 `tests/eval_fixtures/eval_questions.json` holds 40 questions with expected
@@ -317,11 +394,11 @@ values computed by independent SQL, checked against the real database.
 
 ## Next steps
 
+- Ask sidebar: saved chat history, projects, and saved custom views
 - Match Centre (worm, Manhattan, win-probability model, key moments, impact)
 - Matchup grid + auto-written pre-match reports
 - Venue, team and tournament dashboards; a scouting board with league-strength adjustment
 - Tool-use fine-tune of a small local model for speed
-- Cricket DIPS: which parts of a record are skill and which are luck, with a live methodology page
 - Single-installer desktop app
 
 ## Licence

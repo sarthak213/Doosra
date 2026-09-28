@@ -26,6 +26,9 @@ deliveries_wickets one row per wicket (a ball can have two), with fielders.
 players_matches    the playing XI of each match, with Cricsheet person ids.
 people             the Cricsheet register (one row per person, ids for other sites).
 people_names       every name the register knows a person by.
+coverage_*,        Cricsheet's coverage periods and figures, and its list of
+missing_matches    known-missing matches (ingest/coverage.py), when the pages
+                   are in the register folder.
 build_info         when and from what the database was built.
 
 Data: Cricsheet (https://cricsheet.org), Open Data Commons Attribution
@@ -45,6 +48,11 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 from tqdm import tqdm
+
+try:
+    from ingest import coverage
+except ImportError:  # run as a script: python ingest/build_db.py
+    import coverage
 
 # Matches are parsed and flushed to disk in batches so the whole Cricsheet
 # archive (tens of thousands of matches) doesn't have to sit in memory.
@@ -238,7 +246,7 @@ def build(sources: list[Path], out: Path, register_dir: Path | None = None, incr
     con = duckdb.connect(str(out))
     try:
         if not incremental:
-            for t in (*MATCH_TABLES, "people", "people_names", "build_info"):
+            for t in (*MATCH_TABLES, "people", "people_names", *coverage.TABLES, "build_info"):
                 con.execute(f"DROP TABLE IF EXISTS {t}")
         for t, cols in SCHEMA.items():
             con.execute(f"CREATE TABLE IF NOT EXISTS {t} ({cols})")
@@ -283,6 +291,7 @@ def build(sources: list[Path], out: Path, register_dir: Path | None = None, incr
         flush()
 
         register_counts = load_register(con, register_dir) if register_dir else {}
+        coverage_counts = coverage.load(con, register_dir) if register_dir else {}
 
         for sql in (
             "CREATE INDEX IF NOT EXISTS idx_deliveries_match ON deliveries(match_id)",
@@ -302,6 +311,7 @@ def build(sources: list[Path], out: Path, register_dir: Path | None = None, incr
             "sources": {s.name: sha256(s) for s in sources if s.is_file()},
             "rows": {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in MATCH_TABLES},
             "register": register_counts,
+            "coverage": coverage_counts,
             "latest_match_date": con.execute("SELECT MAX(date) FROM matches").fetchone()[0],
         }
         con.execute("CREATE OR REPLACE TABLE build_info (key VARCHAR, value VARCHAR)")

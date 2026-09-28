@@ -12,6 +12,8 @@ registry metrics over the derived per-innings tables (see build.py).
     scatter          two metrics for every qualified player (Player Matrix)
     entry_heatmap    a batter's record by when they came in
     similar_players  nearest players on standardised rate metrics
+    fibs_report      the FIBS study: what's skill, what's luck
+    luck_leaderboard luckiest / unluckiest players (FIB metrics)
 
 Inputs are plain names (resolved through catalog/scope); outputs are the
 standard envelope from results.py, so the UI, the MCP tools and the agent
@@ -23,7 +25,7 @@ from __future__ import annotations
 import functools
 import math
 
-from . import catalog, db, registry
+from . import catalog, db, fibs, registry
 from .catalog import ResolutionError
 from .registry import BAT, BOWL
 from .results import franchise_case, highlights, num, overs, result, season_labels
@@ -269,9 +271,11 @@ SELECT * FROM (SELECT *, MAX(_balls) OVER () AS _max_balls FROM ({sql}) q) x
 PROFILE_METRICS = {
     BAT: ["matches", "innings", "runs", "average", "strike_rate", "highest", "hundreds", "fifties",
           "true_sr", "true_average", "match_factor", "era_factor", "first5_sr", "avg_position", "dot_pct",
-          "boundary_pct", "conversion_pct"],
+          "boundary_pct", "conversion_pct", "fib_average", "dismissal_luck", "runs_luck", "regressed_average",
+          "regressed_sr"],
     BOWL: ["matches", "innings", "wickets", "average", "economy", "strike_rate", "best", "five_wkt_hauls",
-           "true_economy", "true_wickets", "match_factor", "dot_pct", "boundary_pct"],
+           "true_economy", "true_wickets", "match_factor", "dot_pct", "boundary_pct",
+           "fib_economy", "fib_average", "wicket_luck", "runs_luck", "regressed_economy", "regressed_average"],
 }
 
 
@@ -298,6 +302,8 @@ def player_profile(player: str, **filters) -> dict:
                                 split_by="format", **filters)
         out[role] = {"summary": summary, "by_format": by_format}
     out["primary_role"] = _primary_role(out)
+    from .coverage import player_notes  # (coverage imports this module)
+    out["coverage_notes"] = player_notes(info)
     if BAT not in out and BOWL not in out:
         out["notes"] = [f"No records for {p.name} with these filters."]
     return out
@@ -636,3 +642,178 @@ GROUP BY m.player
 
 def metric_catalog(role: str | None = None, query: str = "") -> dict:
     return {"metrics": registry.search(query, role), "dimensions": registry.DIMENSIONS}
+
+
+# ---------------------------------------------------------------------------
+# FIBS (see fibs.py)
+# ---------------------------------------------------------------------------
+
+_FGROUP = {"t20": "T20", "t20i": "T20", "odi": "ODI", "list a": "ODI", "odm": "ODI", "test": "MULTI",
+           "tests": "MULTI", "first-class": "MULTI", "multi": "MULTI", "multi-day": "MULTI"}
+_FGROUP_LABEL = {"T20": "T20", "ODI": "one-day", "MULTI": "multi-day (Tests and first-class)"}
+# Tiny, rare outcomes: estimates are too noisy to headline.
+_MINOR = {"hit_wicket", "ct_bowler"}
+
+
+def _fgroup(fmt: str | None) -> str:
+    if not fmt:
+        return "T20"
+    g = _FGROUP.get(str(fmt).strip().lower())
+    if not g:
+        raise EngineError("format must be T20, ODI or Test (the study groups formats).")
+    return g
+
+
+def _fibs_findings(stab: list[dict], pred: list[dict], role: str, fg: str) -> list[str]:
+    out = []
+    comps = [r for r in stab if r["k_balls"] and r["metric"] not in _MINOR and r["grp"] == "outcome"]
+    unit = "deliveries" if role == BOWL else "balls faced"
+    if not comps:
+        n = max((r["n_seasons"] for r in stab), default=0)
+        min_n = fibs.MIN_SEASON[role][fg]
+        return [f"Only {n} player-seasons reach {min_n} {unit} here -- too few to separate skill from noise "
+                f"(the study needs {fibs.MIN_SAMPLES}+)."]
+    comps.sort(key=lambda r: r["k_balls"])
+    fast = ", ".join(f"{r['label'].lower()} (K {r['k_balls']:,.0f})" for r in comps[:3])
+    slow = ", ".join(f"{r['label'].lower()} (K {r['k_balls']:,.0f})" for r in comps[-3:][::-1])
+    out.append(f"Fastest to become reliable: {fast}. Slowest: {slow}. K is the number of {unit} at which a "
+               "rate is half skill, half noise.")
+
+    def yoy(r):  # too few season pairs -> no year-to-year estimate
+        return f"{r['yoy_r']:.2f}" if r["yoy_r"] is not None else "n/a (too few season pairs)"
+
+    by = {r["metric"]: r for r in stab}
+    key = "wickets" if role == BOWL else "outs"
+    w = by.get(key)
+    if w and w["k_balls"] and w["reliability_typical"] is not None:
+        out.append(f"{w['label']}: a typical season ({w['typical_balls']:,.0f} {unit}) is "
+                   f"{100 * w['reliability_typical']:.0f}% signal; it takes {w['k_balls']:,.0f} {unit} for "
+                   f"half the spread between players to be real. Year-to-year r = {yoy(w)}.")
+    r = by.get("runs")
+    if r and r["k_balls"] and r["reliability_typical"] is not None:
+        out.append(f"{r['label']}: a typical season is {100 * r['reliability_typical']:.0f}% signal "
+                   f"(K {r['k_balls']:,.0f}, year-to-year r = {yoy(r)}).")
+    for target, name in (("runs", "economy"), ("wickets", "wicket rate")):
+        rows = sorted((x for x in pred if x["target"] == target), key=lambda x: x["rmse"])
+        if not rows:
+            continue
+        raw = next((x for x in rows if x["predictor"] == "this season"), None)
+        fib = next((x for x in rows if x["predictor"].startswith("this season, DIPS-style")), None)
+        line = f"Predicting next season's {name}: best is '{rows[0]['predictor']}'"
+        if raw and fib:
+            better = "beats" if fib["rmse"] < raw["rmse"] else "does not beat"
+            line += (f"; the DIPS-style replacement (league average for fielding-affected outcomes) {better} the raw figure "
+                     f"(error {fib['rmse']:.3f} vs {raw['rmse']:.3f} {rows[0]['unit']})")
+        out.append(line + ".")
+    return out
+
+
+@_tool
+def fibs_report(format: str | None = "T20", gender: str | None = "male", role: str = BOWL) -> dict:
+    """The FIBS study for one format group: how reliable each outcome
+    is (K, split-half and year-to-year correlations) and, for bowling, which
+    of this season's figures best predicts next season's."""
+    role = _role(role)
+    fg = _fgroup(format)
+    g = (catalog.resolve_gender(gender) if gender else None) or "male"
+    stab = db.query("SELECT * FROM fibs_stability WHERE fgroup = ? AND gender = ? AND role = ? "
+                    "ORDER BY grp DESC, k_balls NULLS LAST", [fg, g, role])
+    if not stab:
+        raise EngineError("No FIBS study results for this format and gender (not enough data, or the analytics "
+                          "tables need rebuilding: python -m analytics.build).")
+    pred = db.query("SELECT * FROM fibs_prediction WHERE fgroup = ? AND gender = ? ORDER BY target, rmse",
+                    [fg, g]) if role == BOWL else []
+    cols = ["metric", "label", "unit", "league_rate", "true_sd", "k_balls", "typical_balls",
+            "reliability_typical", "split_half_r", "yoy_r", "n_seasons", "n_pairs"]
+    rows = [[r["metric"], r["label"], r["unit"],
+             None if r["league_rate"] is None else r["league_rate"] * r["scale"],
+             None if r["true_sd"] is None else r["true_sd"] * r["scale"],
+             r["k_balls"], r["typical_balls"], r["reliability_typical"], r["split_half_r"], r["yoy_r"],
+             r["n_seasons"], r["n_pairs"]] for r in stab]
+    notes = [
+        "Rates are above expected: versus an average player in the same ball states (format, year, gender, "
+        "innings, over, wickets down).",
+        "K = balls at which a rate is half skill, half noise; reliability over n balls = n / (n + K). "
+        "true_sd = the spread of true talent between players, in the metric's unit.",
+        "Caught behind uses an inferred keeper (the XI member with stumpings). No ball tracking or "
+        "dropped-catch data exists, so 'luck' here is everything the measured skill doesn't explain.",
+    ]
+    title = f"FIBS — {role}, {_FGROUP_LABEL[fg]}, {g}"
+    prediction = None
+    if pred:
+        base = {x["target"]: x["rmse"] for x in pred if x["predictor"] == "league average"}
+        # gain_pct: how much each predictor cuts the error of guessing the
+        # league average (computed here, before rounding for display).
+        prediction = result("Which figure predicts next season best?",
+                            ["target", "predictor", "rmse", "gain_pct", "r", "n_pairs", "unit"],
+                            [[x["target"], x["predictor"], x["rmse"],
+                              100 * (1 - x["rmse"] / base[x["target"]]) if base.get(x["target"]) else None,
+                              x["r"], x["n_pairs"], x["unit"]] for x in pred])
+    return result(title, cols, rows, None, notes, labels=[
+        "Metric", "Label", "Unit", "League rate", "True-talent SD", "K (balls)", "Typical season", "Reliability "
+        "(typical season)", "Split-half r", "Year-to-year r", "Seasons", "Season pairs"],
+        findings=_fibs_findings(stab, pred, role, fg), prediction=prediction,
+        format_group=fg, gender=g, role=role)
+
+
+LUCK_METRICS = {
+    BOWL: ["wickets", "fib_wickets", "wicket_luck", "economy", "fib_economy", "runs_luck"],
+    BAT: ["runs", "average", "fib_average", "dismissal_luck", "runs_luck"],
+}
+
+
+@_tool
+def luck_leaderboard(role: str = BOWL, unlucky: bool = False, by: str | None = None, limit: int = 15,
+                     min_balls: int | None = None, **filters) -> dict:
+    """Players whose records owe most (or least, with unlucky=True) to
+    catches in the field and runs off shots in play, beyond what their skill
+    accounts for. `by` picks the luck measure (bowling: wicket_luck or
+    runs_luck; batting: dismissal_luck or runs_luck)."""
+    role = _role(role)
+    by = by or ("wicket_luck" if role == BOWL else "dismissal_luck")
+    if by not in LUCK_METRICS[role]:
+        raise EngineError(f"by must be one of: {', '.join(m for m in LUCK_METRICS[role] if 'luck' in m)}")
+    out = query_stats(role=role, metrics=LUCK_METRICS[role], sort_by=by, ascending=unlucky, limit=limit,
+                      min_balls=min_balls, **filters)
+    if "error" in out:
+        return out
+    who = "bowlers" if role == BOWL else "batters"
+    out["title"] = f"{'Unluckiest' if unlucky else 'Luckiest'} {who} by " + out["title"].split(" by ", 1)[-1]
+    out.setdefault("notes", []).append(
+        "Luck = the part of catches in the field / runs off shots in play that the player's measured skill "
+        "doesn't account for (their own rate regressed by the reliability the FIBS study measured). Over a "
+        "career it is small; over a season it can be several wickets.")
+    return out
+
+
+@_tool
+def fibs_pairs(metric: str = "dot", format: str | None = "T20", gender: str | None = "male", role: str = BOWL,
+               limit: int = 1500) -> dict:
+    """Player-season pairs (this season, next season) of one metric above
+    expected -- the points behind the year-to-year persistence chart."""
+    role = _role(role)
+    fg = _fgroup(format)
+    g = (catalog.resolve_gender(gender) if gender else None) or "male"
+    specs = {s.id: s for s in fibs._specs(role)}
+    if metric not in specs:
+        raise EngineError(f"metric must be one of: {', '.join(specs)}")
+    s, main = specs[metric], ("deliveries" if role == BOWL else "balls")
+    table = "bowling_innings" if role == BOWL else "batting_innings"
+    min_n = fibs.MIN_SEASON[role][fg]
+    limit = max(1, min(int(limit or 1500), 5000))
+    rows = db.query(f"""
+        WITH s AS (
+            SELECT player, yr, SUM({s.num}) AS n, SUM({s.exp}) AS x, SUM({s.den}) AS d, SUM({main}) AS main
+            FROM {table} WHERE fgroup = ? AND COALESCE(gender, 'unknown') = ?
+            GROUP BY player, yr HAVING SUM({main}) >= {min_n} AND SUM({s.den}) > 0
+        )
+        SELECT a.player, a.yr, (a.n - a.x) / a.d * {s.scale} AS this_season,
+               (b.n - b.x) / b.d * {s.scale} AS next_season, a.main AS balls, b.main AS balls_next
+        FROM s a JOIN s b ON b.player = a.player AND b.yr = a.yr + 1
+        ORDER BY a.main + b.main DESC LIMIT {limit}
+    """, [fg, g])
+    cols = ["player", "yr", "this_season", "next_season", "balls", "balls_next"]
+    title = f"{s.label}: this season vs next ({_FGROUP_LABEL[fg]}, {g})"
+    notes = [f"Above expected, {s.unit}. Player-seasons with at least {min_n} "
+             f"{'deliveries' if role == BOWL else 'balls faced'} in both years; the busiest {limit} pairs."]
+    return result(title, cols, [[r[c] for c in cols] for r in rows], None, notes, unit=s.unit, label=s.label)

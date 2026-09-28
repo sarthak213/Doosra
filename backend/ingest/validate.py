@@ -33,6 +33,7 @@ from pathlib import Path
 
 import duckdb
 
+from analytics import fibs
 from analytics.build import DERIVED_TABLES
 from analytics.scope import CREDITED_SQL, NOT_DISMISSALS_SQL
 from ingest.build_db import SCHEMA, SCHEMA_VERSION
@@ -42,6 +43,7 @@ SHRINK_TOLERANCE = 0.005
 # Runs above expected is zero by construction per ball state, except where a
 # thin state falls back to the all-years estimate.
 RAE_TOLERANCE = 0.01
+FIBS_TOLERANCE = 0.02
 
 # Retired players whose records are frozen (register unique names). A name is
 # only frozen if the player's last match is at least RETIRED_YEARS before the
@@ -181,7 +183,7 @@ def check_schema(con, rep: Report):
         want = {c.split()[0] for c in ddl.replace("\n", " ").split(",")}
         missing = want - _columns(con, t)
         rep.check(not missing, f"schema: {t} missing columns {sorted(missing)}")
-    for t in ("people", "people_names", "build_info", *DERIVED_TABLES):
+    for t in ("people", "people_names", "build_info", *DERIVED_TABLES, *fibs.TABLES):
         rep.check(t in tables, f"schema: table {t} missing")
     for t in DERIVED_TABLES:
         if t in tables:
@@ -229,6 +231,14 @@ def check_invariants(con, rep: Report):
         rep.check(abs(rae) <= RAE_TOLERANCE * runs,
                   f"invariant: runs above expected sums to {rae:,.0f} for {fg} ({runs:,} runs)")
 
+    # FIBS: expected outfield catches are per-ball-state averages, so they
+    # balance the observed ones (up to the thin-state fallback).
+    for fg, n, x in con.execute("""
+            SELECT fgroup, SUM(n_ct_field), SUM(x_ct_field) FROM bowling_innings
+            GROUP BY fgroup ORDER BY 1""").fetchall():
+        rep.check(abs(n - x) <= FIBS_TOLERANCE * max(n, 1),
+                  f"invariant: expected catches in the field {x:,.0f} vs observed {n:,} for {fg}")
+
     no_version = _one(con, "SELECT COUNT(*) FROM matches WHERE data_version IS NULL")
     rep.check(no_version == 0, f"invariant: {no_version} matches without a data_version")
 
@@ -236,6 +246,20 @@ def check_invariants(con, rep: Report):
                            WHERE player_id IS NOT NULL AND player_id NOT IN (SELECT identifier FROM people)""")
     if unknown:
         rep.warn(f"register: {unknown} player ids aren't in people.csv yet")
+
+
+def check_coverage(con, rep: Report):
+    """Cricsheet's coverage / missing-match pages: absent from the build ->
+    warn; downloaded but parsed to nothing -> fail (Cricsheet changed the
+    page layout; don't ship an empty Data page)."""
+    row = con.execute("SELECT value FROM build_info WHERE key = 'coverage'").fetchone()
+    parsed = json.loads(row[0]) if row and row[0] else {}
+    if not parsed:
+        rep.warn("coverage: Cricsheet's coverage pages weren't in the build; the Data page will be empty")
+        return
+    empty = [t for t, n in parsed.items() if not n]
+    rep.check(not empty, f"coverage: Cricsheet's pages parsed to no rows for {', '.join(empty)} -- "
+                         "the page layout may have changed (see ingest/coverage.py)")
 
 
 def check_careers(con, rep: Report, frozen_path: Path = FROZEN_FILE):
@@ -263,6 +287,7 @@ def validate(db_path: Path, previous: dict | None = None, frozen_path: Path = FR
             return rep
         check_counts(con, rep, previous)
         check_invariants(con, rep)
+        check_coverage(con, rep)
         check_careers(con, rep, frozen_path)
     finally:
         con.close()

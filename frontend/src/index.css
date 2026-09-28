@@ -1,4 +1,6 @@
 :root {
+  /* Native controls (select menus, scrollbars) render dark to match. */
+  color-scheme: dark;
   --pitch: #0f1e16;
   --pitch-raised: #16281d;
   --pitch-raised-2: #1c3024;

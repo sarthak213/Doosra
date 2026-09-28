@@ -21,7 +21,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from agent import stats, tools
-from analytics import engine, registry
+from analytics import coverage, engine, registry
 from analytics.scope import normalize_filters
 
 INSTRUCTIONS = """Cricket analytics over Cricsheet ball-by-ball data (men's and women's Tests, ODIs, T20Is
@@ -29,7 +29,9 @@ and major leagues). Pass names as a person would write them -- the tools resolve
 (including every historical name of a tournament), teams and venues, and report what they resolved to in
 `notes`. Every stats tool accepts the same optional `filters` object. Use search_metrics to discover the
 100+ metrics (traditional, scoring profile, reliability, and context-adjusted ones such as true strike
-rate, true average, runs above expected, match factor and era factor)."""
+rate, true average, runs above expected, match factor and era factor), plus FIBS (Fielding-Independent
+Bowling Statistics, a cricket analogue of baseball's DIPS): FIB figures, luck, and reliability-adjusted
+("regressed") figures -- see fibs_report."""
 
 mcp = FastMCP("doosra", instructions=INSTRUCTIONS, log_level="WARNING")
 
@@ -38,8 +40,9 @@ RoleF = Literal["batting", "bowling", "fielding"]
 Filters = Annotated[dict[str, Any] | None, Field(description=(
     "Optional filters, all plain words: competition ('IPL', 'T20 World Cup', 'Ashes'), format ('Test', 'ODI', "
     "'T20I', 'T20' = all T20 incl. leagues, 'first-class', 'List A', 'international'), gender ('male', "
-    "'female', 'all'), team, opposition, venue, season ('2024' or '2023/24'), from_year, to_year, phase "
-    "('powerplay', 'middle', 'death'), innings (1 = batting first, 2 = chasing)."))]
+    "'female', 'all'), team, opposition, venue, season ('2024', '2023/24' or 'latest'), from_year, to_year, phase "
+    "('powerplay', 'middle', 'death'), innings (limited overs: 1 = batting first, 2 = chasing; Tests and "
+    "first-class: 1-4, where 3 and 4 are each side's second innings)."))]
 Metrics = Annotated[list[str] | None, Field(description="Metric ids from search_metrics; defaults to a sensible set.")]
 SplitBy = Annotated[str | None, Field(description=(
     "Break the figures down by: " + ", ".join(registry.DIMENSIONS) + "."))]
@@ -101,6 +104,46 @@ def leaderboard(metric: str, role: RoleF = "batting", extra_metrics: Metrics = N
                      if m != metric]
     return engine.query_stats(role=role, metrics=ms, sort_by=metric, ascending=ascending, min_balls=min_balls,
                               limit=limit, **_f(filters))
+
+
+@mcp.tool()
+def data_coverage(view: Literal["summary", "missing"] = "summary", format: Literal["Test", "ODI"] | None = None,
+                  competition: str | None = None, team: str | None = None,
+                  gender: Literal["male", "female"] | None = None, from_year: int | None = None,
+                  to_year: int | None = None, limit: int = 50) -> dict:
+    """What the data covers and what it's missing (from Cricsheet). view='summary': matches held per format
+    since when, known-missing counts and coverage %, coverage by competition and team, and the matches Cricsheet
+    withholds (everything involving Afghanistan). view='missing': the list of known-missing matches, filtered by
+    format (Test/ODI), competition, team, gender and years. Use when a total looks short of the official record,
+    or to ask whether a match or series is in the data."""
+    if view == "missing":
+        return coverage.missing_matches(format=format, competition=competition, gender=gender, team=team,
+                                        from_year=from_year, to_year=to_year, limit=limit)
+    return coverage.data_coverage(gender=gender)
+
+
+@mcp.tool()
+def fibs_report(format: Literal["T20", "ODI", "Test"] = "T20", gender: Literal["male", "female"] = "male",
+                role: Role = "bowling") -> dict:
+    """FIBS (Fielding-Independent Bowling Statistics, cricket's analogue of baseball's DIPS): which parts
+    of a record are repeatable skill and which are fielding and luck. For each
+    outcome (dots, boundaries, wides, bowled, lbw, caught behind, caught in the field, run outs...): K (balls
+    until a rate is half skill, half noise), split-half and year-to-year correlations; for bowling, which of
+    this season's figures (raw, regressed, DIPS-style, luck-adjusted) best predicts next season's. `findings` summarises it in plain
+    English. Use for 'is X's economy real?', 'how many balls before a wicket rate means anything?'."""
+    return engine.fibs_report(format=format, gender=gender, role=role)
+
+
+@mcp.tool()
+def luck_leaderboard(role: Role = "bowling", unlucky: bool = False,
+                     by: Literal["wicket_luck", "runs_luck", "dismissal_luck"] | None = None,
+                     min_balls: int | None = None, limit: int = 10, filters: Filters = None) -> dict:
+    """Luckiest (or with unlucky=True, unluckiest) players: wickets/dismissals and runs that came from catches
+    in the field and runs off shots in play beyond what their measured skill accounts for, alongside their
+    Fielding-Independent (FIB) figures. Bowling luck: wicket_luck (default) or runs_luck; batting:
+    dismissal_luck (default) or runs_luck. Most meaningful for a season or a tournament."""
+    return engine.luck_leaderboard(role=role, unlucky=unlucky, by=by, min_balls=min_balls, limit=limit,
+                                   **_f(filters))
 
 
 @mcp.tool()

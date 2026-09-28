@@ -15,33 +15,79 @@ export function useMetrics() {
 }
 
 // A text input that commits on Enter or blur (so typing doesn't refetch on
-// every keystroke), with optional suggestions.
-function CommitInput({ value, onCommit, placeholder, list, type = "text", ariaLabel }) {
+// every keystroke), with optional suggestions in a themed list (a native
+// <datalist> popup can't be styled).
+export function CommitInput({ value, onCommit, placeholder, options, type = "text", ariaLabel }) {
   const [draft, setDraft] = useState(value ?? "");
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
   useEffect(() => setDraft(value ?? ""), [value]);
-  const commit = () => {
-    const v = type === "number" ? (draft === "" ? null : Number(draft)) : draft.trim() || null;
+  const commitValue = (raw) => {
+    const v = type === "number" ? (raw === "" ? null : Number(raw)) : String(raw).trim() || null;
     if (v !== (value ?? null)) onCommit(v);
   };
+  const matches = useMemo(() => {
+    if (!options?.length) return [];
+    const q = String(draft).trim().toLowerCase();
+    const hits = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
+    return hits.slice(0, 8);
+  }, [options, draft]);
+  const pick = (o) => { setDraft(o); setOpen(false); commitValue(o); };
+  const shown = open && matches.length > 0 && !(matches.length === 1 && matches[0] === draft);
   return (
-    <input type={type} value={draft} placeholder={placeholder} list={list} aria-label={ariaLabel || placeholder}
-      onChange={(e) => setDraft(e.target.value)} onBlur={commit}
-      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} />
+    <div className="suggest">
+      <input type={type} value={draft} placeholder={placeholder} aria-label={ariaLabel || placeholder}
+        role={options ? "combobox" : undefined} aria-expanded={options ? shown : undefined} autoComplete="off"
+        onChange={(e) => { setDraft(e.target.value); setOpen(true); setActive(-1); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => { setOpen(false); commitValue(draft); }}
+        onKeyDown={(e) => {
+          if (shown && e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(a + 1, matches.length - 1)); }
+          else if (shown && e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
+          else if (e.key === "Enter") {
+            if (shown && active >= 0) { e.preventDefault(); pick(matches[active]); } else e.currentTarget.blur();
+          } else if (e.key === "Escape") setOpen(false);
+        }} />
+      {shown && (
+        <ul className="autocomplete-list suggest-list" role="listbox">
+          {matches.map((o, i) => (
+            <li key={o} role="option" aria-selected={i === active} className={i === active ? "active" : ""}
+              onMouseDown={(e) => { e.preventDefault(); pick(o); }}>{o}</li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
+// Innings choices depend on the format: a Test has four innings; limited
+// overs have two (setting and chasing).
+const MULTI_DAY = new Set(["Test", "first-class"]);
+const LIMITED = new Set(["ODI", "T20I", "T20", "List A"]);
+function inningsOptions(format) {
+  if (MULTI_DAY.has(format)) return ["", "1", "2", "3", "4"];
+  if (LIMITED.has(format)) return ["", "1", "2"];
+  return ["", "1", "2", "3", "4"];
+}
+function inningsNames(format) {
+  if (LIMITED.has(format)) return { "": "all", 1: "1st (setting)", 2: "2nd (chasing)" };
+  if (MULTI_DAY.has(format)) return { "": "all", 1: "1st", 2: "2nd", 3: "3rd", 4: "4th" };
+  return { "": "all", 1: "1st (setting)", 2: "2nd (chasing)", 3: "3rd (multi-day)", 4: "4th (multi-day)" };
+}
+
 const FIELDS = {
-  competition: { label: "Competition", list: "opt-competitions", placeholder: "any" },
+  competition: { label: "Competition", options: "competitions", placeholder: "any" },
   format: { label: "Format", select: ["", "Test", "ODI", "T20I", "T20", "first-class", "List A", "international"] },
   gender: { label: "Gender", select: ["", "male", "female", "all"], names: { "": "auto" } },
-  team: { label: "Team", list: "opt-teams", placeholder: "any" },
-  opposition: { label: "Opposition", list: "opt-teams", placeholder: "any" },
-  venue: { label: "Venue", list: "opt-venues", placeholder: "any" },
+  team: { label: "Team", options: "teams", placeholder: "any" },
+  opposition: { label: "Opposition", options: "teams", placeholder: "any" },
+  venue: { label: "Venue", options: "venues", placeholder: "any" },
   season: { label: "Season", placeholder: "e.g. 2024" },
   from_year: { label: "From", type: "number", placeholder: "year" },
   to_year: { label: "To", type: "number", placeholder: "year" },
   phase: { label: "Phase", select: ["", "powerplay", "middle", "death"], names: { "": "all" } },
-  innings: { label: "Innings", select: ["", "1", "2"], names: { "": "both", 1: "1st (setting)", 2: "2nd (chasing)" } },
+  innings: { label: "Innings", select: (filters) => inningsOptions(filters?.format),
+    names: (filters) => inningsNames(filters?.format) },
 };
 
 // The shared filter bar. `show` limits which filters appear.
@@ -51,6 +97,8 @@ export function FilterBar({ filters, onChange, show = Object.keys(FIELDS) }) {
     const next = { ...filters };
     if (v === null || v === "" || v === undefined) delete next[key];
     else next[key] = key === "innings" ? Number(v) : v;
+    // Limited-overs formats have no 3rd or 4th innings.
+    if (key === "format" && next.innings > 2 && LIMITED.has(next.format)) delete next.innings;
     onChange(next);
   };
   const active = Object.keys(filters || {}).length;
@@ -58,17 +106,20 @@ export function FilterBar({ filters, onChange, show = Object.keys(FIELDS) }) {
     <div className="filter-bar" role="group" aria-label="Filters">
       {show.map((key) => {
         const f = FIELDS[key];
+        const choices = typeof f.select === "function" ? f.select(filters) : f.select;
+        const names = typeof f.names === "function" ? f.names(filters) : f.names;
         return (
           <label key={key} className="filter-field">
             <span>{f.label}</span>
             {f.select ? (
               <select value={filters?.[key] ?? ""} onChange={(e) => set(key, e.target.value)}>
-                {f.select.map((o) => (
-                  <option key={o} value={o}>{f.names?.[o] ?? (o || "any")}</option>
+                {choices.map((o) => (
+                  <option key={o} value={o}>{names?.[o] ?? (o || "any")}</option>
                 ))}
               </select>
             ) : (
-              <CommitInput value={filters?.[key]} onCommit={(v) => set(key, v)} placeholder={f.placeholder} list={f.list}
+              <CommitInput value={filters?.[key]} onCommit={(v) => set(key, v)} placeholder={f.placeholder}
+                options={f.options ? options?.[f.options]?.slice(0, f.options === "competitions" ? 120 : undefined) : undefined}
                 type={f.type} ariaLabel={f.label} />
             )}
           </label>
@@ -77,9 +128,6 @@ export function FilterBar({ filters, onChange, show = Object.keys(FIELDS) }) {
       {active > 0 && (
         <button type="button" className="ghost-btn filter-clear" onClick={() => onChange({})}>Clear ({active})</button>
       )}
-      <datalist id="opt-competitions">{options?.competitions?.slice(0, 120).map((c) => <option key={c} value={c} />)}</datalist>
-      <datalist id="opt-teams">{options?.teams?.map((c) => <option key={c} value={c} />)}</datalist>
-      <datalist id="opt-venues">{options?.venues?.map((c) => <option key={c} value={c} />)}</datalist>
     </div>
   );
 }
