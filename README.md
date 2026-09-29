@@ -3,7 +3,9 @@
 A cricket analytics workbench: player hubs, comparisons, a query builder and
 a player matrix over ball-by-ball data, with context-adjusted metrics (true
 strike rate, match factor, era factor...) and an AI copilot that can explain
-any view or drive the app. Every analytics capability is also an MCP tool, so
+any view or drive the app, plus an Ask workspace of saved chats, projects with
+your own notes, and boards of charts the AI can explain. It runs locally or as
+an invite-only hosted container. Every analytics capability is also an MCP tool, so
 any MCP-capable app (Claude Desktop and others) can use it directly.
 
 Data: [Cricsheet](https://cricsheet.org/) ball-by-ball data and register,
@@ -78,6 +80,9 @@ cp .env.example .env
 
 # 3. Run the API
 uvicorn main:app --reload --port 8000
+# (or run everything in one container instead -- see "Hosting" for the image;
+#  locally, with LM Studio on the same machine:)
+# docker run -p 8000:8000 -e AUTH_MODE=none -e SERVE_FRONTEND=1 -e LLM_PROVIDER=lmstudio #   -e LLM_BASE_URL=http://host.docker.internal:1234/v1 -e LLM_MODEL=qwen/qwen3.5-9b #   -v doosra-data:/app/backend/data doosra
 ```
 
 ```bash
@@ -150,8 +155,12 @@ python -m ingest.validate
   format/season/opposition/phase/position/entry point/dismissal, an
   entry-point heatmap, and similar players. Watchlist toggle.
 - **Comparison Studio** (`/compare`) — up to four players on the same
-  filters: side-by-side table, percentile bars, and career arcs aligned by
-  innings number.
+  filters: side-by-side table, percentile bars, career arcs aligned by
+  innings number, and a **By phase** panel (powerplay, middle overs, death)
+  for batters and bowlers: grouped bars for a chosen metric over a table that
+  puts the players next to each other in each phase. With the batting-role
+  filters (below) an opener can be compared with openers and a finisher with
+  finishers.
 - **Query Builder** (`/query`) — any registry metrics as columns, any
   filters, sort and qualification, optional split. Save/load queries, CSV
   export, click through to players.
@@ -338,6 +347,15 @@ directly, while a saved chat (the Ask tab, a project, a board explanation)
 reasons first and says so, since that can take a few minutes on a local model.
 `on` or `off` forces one mode. For per-request switching, leave reasoning
 enabled in LM Studio: while it is switched off there, requests can't turn it on.
+A quick answer is sent with `reasoning_effort: "none"`, which LM Studio honours
+for Qwen3.5 (it ignores the chat-template `enable_thinking` switch and Qwen's
+`/no_think`). On a laptop's integrated GPU with Qwen3.5-9B, the same question
+took about 35 seconds as a quick answer and about 75 with reasoning. A saved
+chat keeps answering if you leave the page, and the reopened chat picks the
+answer up; its reasoning is kept as steps in the trace.
+
+Answers put player and team names and key numbers in bold, use short bullet
+lists, and use a small table when comparing three or more players.
 
 Local models are slowest at reading the prompt, so the prompt is laid out to
 be reused: the fixed rules and the tool definitions come first and never
@@ -500,7 +518,7 @@ per-process; a public deployment needs shared ones.
 
 ```bash
 cd backend
-pytest                  # ~670 tests: ingest, release pipeline, coverage, scoring rules, FIBS, engine, API, workspace, auth, hosting, MCP, agent graph
+pytest                  # ~715 tests: ingest, release pipeline, coverage, scoring rules, FIBS, engine, API, workspace, auth, hosting, MCP, agent graph
 pytest -m llm           # LLM-in-the-loop eval (needs a model endpoint)
 ```
 
