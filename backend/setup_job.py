@@ -188,14 +188,19 @@ def _test(step: Step) -> None:
 
 
 def test_prompt() -> str:
-    """One tiny request straight to the model server, without reasoning."""
+    """One tiny request straight to the model server, without reasoning. It uses a client of its own:
+    this runs on its own event loop, and the app's shared client would keep a connection tied to that
+    loop after it closes, failing the next real question with "Event loop is closed"."""
     import asyncio
+
+    from openai import AsyncOpenAI
 
     async def ask():
         extra = {"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"}
-        r = await graph.client.chat.completions.create(
-            model=graph.MODEL, messages=[{"role": "user", "content": "Reply with just the word: ready"}],
-            max_tokens=16, temperature=0, extra_body=extra)
+        async with AsyncOpenAI(base_url=graph.BASE_URL, api_key=graph.client.api_key, timeout=60, max_retries=0) as c:
+            r = await c.chat.completions.create(
+                model=graph.MODEL, messages=[{"role": "user", "content": "Reply with just the word: ready"}],
+                max_tokens=16, temperature=0, extra_body=extra)
         return (r.choices[0].message.content or "").strip() or "(no text)"
     return asyncio.run(ask())
 

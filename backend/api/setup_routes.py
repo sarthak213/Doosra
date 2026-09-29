@@ -20,6 +20,7 @@ import desktop_app
 import doosra_home
 import local_llm
 import setup_job
+from version import VERSION
 from analytics import db
 from ingest import pull
 
@@ -58,7 +59,7 @@ def status():
         "hardware": _hardware(),
         "data": {"built_at": info.get("built_at"), "latest_match": info.get("latest_match_date")} if info else None,
         "engine": local_llm.ENGINE.status(), "setup": setup_job.JOB.snapshot(),
-        "home": str(doosra_home.home()),
+        "home": str(doosra_home.home()), "version": VERSION,
     }
 
 

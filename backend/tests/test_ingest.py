@@ -154,6 +154,19 @@ def test_build_info(built):
     assert json.loads(stored["rows"])["matches"] == 2
 
 
+def test_build_info_can_be_read_while_the_api_has_the_database_open(built, monkeypatch):
+    # The desktop app's status check reads build_info while requests are querying the same file.
+    from analytics import db
+    from ingest import pull
+    out, _ = built
+    monkeypatch.setattr(db, "DB_PATH", out)
+    con = db.connect()
+    try:
+        assert pull.local_info(out)["latest_match_date"] == "2025-02-01"
+    finally:
+        con.close()
+
+
 def test_incremental_upsert_replaces_matches(built, tmp_path):
     out, _ = built
     revised = json.loads(json.dumps(DLS))

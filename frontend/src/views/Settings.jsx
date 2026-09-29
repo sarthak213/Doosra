@@ -34,7 +34,7 @@ export default function Settings() {
       <div className="view-head">
         <div>
           <h1>Settings</h1>
-          <p className="muted">Everything Doosra keeps is in {status.home}.</p>
+          <p className="muted">Doosra {status.version}. Everything it keeps is in {status.home}.</p>
         </div>
       </div>
       {message && <p className="resolution-note" role="status">{message}</p>}

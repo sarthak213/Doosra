@@ -1,8 +1,12 @@
 """The desktop app's first-run setup and settings, with a fake engine and fake downloads
 (no GPU, no network)."""
 
+import asyncio
 import hashlib
+import json
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from fastapi.testclient import TestClient
@@ -145,3 +149,36 @@ class TestSetupJob:
         job = setup_job.start(engine="lmstudio")
         assert wait_for(job) == "done" and graph.PROVIDER == "lmstudio" and graph.MODEL == "qwen/qwen3.5-9b"
         assert desktop_app.load_settings()["engine"] == "lmstudio" and setup_job.ready()
+
+
+class _FakeModelServer(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"          # keep-alive, like llama-server: the connection outlives a request
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = json.dumps({"id": "x", "object": "chat.completion", "created": 0, "model": "m", "choices": [
+            {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ready"}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def test_the_setup_check_leaves_the_apps_client_usable(desktop):
+    # The check runs on an event loop of its own; the next real question runs on the server's loop.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModelServer)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        graph.configure("llamacpp", base_url=f"http://127.0.0.1:{server.server_port}/v1")
+        assert setup_job.test_prompt() == "ready"
+
+        async def question():
+            r = await graph.client.chat.completions.create(model=graph.MODEL, messages=[{"role": "user", "content": "hi"}])
+            return r.choices[0].message.content
+        assert asyncio.run(question()) == "ready"
+    finally:
+        server.shutdown()

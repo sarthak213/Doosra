@@ -110,7 +110,9 @@ def local_info(path: Path = TARGET) -> dict | None:
     if not path.exists():
         return None
     try:
-        con = duckdb.connect(str(path), read_only=True)
+        # the API's own settings (analytics.db.connect): DuckDB refuses a second connection to an open file
+        # with different ones, and this runs while requests are reading the same database
+        con = duckdb.connect(str(path), read_only=True, config={"enable_external_access": False})
     except duckdb.Error:
         return None
     try:
