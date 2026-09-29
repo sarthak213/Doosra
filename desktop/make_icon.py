@@ -22,6 +22,7 @@ SVG = HERE.parent / "frontend" / "public" / "favicon.svg"
 OUT = HERE / "assets" / "doosra.ico"
 SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 RENDER = 1024
+PITCH = "#0f1e16"                                 # the app's background (--pitch in frontend/src/index.css)
 EDGE = [Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
         Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe")]
 
@@ -56,6 +57,12 @@ def main() -> None:
         ball = big.resize((px, px), Image.LANCZOS)
         tile.paste(ball, mask=ball)
         tile.save(OUT.with_name(f"wizard-small-{px}.bmp"))
+    for scale in (1, 2):                                                   # the welcome and finish pages' side panel
+        w, h = 164 * scale, 314 * scale
+        panel = Image.new("RGB", (w, h), PITCH)
+        ball = big.resize((w * 3 // 5,) * 2, Image.LANCZOS)
+        panel.paste(ball, ((w - ball.width) // 2, h // 3 - ball.height // 2), mask=ball)
+        panel.save(OUT.with_name(f"wizard-large-{w}.bmp"))
     print(f"wrote {OUT} ({', '.join(map(str, SIZES))} px)")
 
 

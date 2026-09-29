@@ -35,6 +35,7 @@ SetupIconFile=assets\doosra.ico
 UninstallDisplayIcon={app}\Doosra.exe
 UninstallDisplayName=Doosra
 WizardStyle=modern
+WizardImageFile=assets\wizard-large-164.bmp,assets\wizard-large-328.bmp
 WizardSmallImageFile=assets\wizard-small-55.bmp,assets\wizard-small-110.bmp
 Compression=lzma2/max
 SolidCompression=yes

@@ -179,7 +179,7 @@ def run_window(api: Api) -> None:
     import webview
 
     webview.create_window(TITLE, api.url, width=1280, height=800, min_size=(960, 640), maximized=True,
-                          background_color="#16150f")
+                          background_color="#0f1e16")
     # A saved profile (not private mode), kept with the app's data, so the page's own storage survives restarts.
     webview.start(private_mode=False, storage_path=str(doosra_home.home() / "webview"))
 
