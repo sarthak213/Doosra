@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { API_BASE } from "../api.js";
+import { useDesktop } from "../desktop/DesktopProvider.jsx";
 import UserMenu from "./UserMenu.jsx";
 import Wordmark from "./Wordmark.jsx";
 
@@ -20,6 +21,7 @@ const NAV = [
 ];
 
 export default function Masthead() {
+  const { desktop } = useDesktop();
   const [stats, setStats] = useState(null);
 
   useEffect(() => {
@@ -53,6 +55,7 @@ export default function Masthead() {
         </div>
       </dl>
       <UserMenu />
+      {desktop && <NavLink to="/settings" className="masthead-settings" aria-label="Settings" title="Settings">⚙</NavLink>}
     </header>
   );
 }
