@@ -323,3 +323,15 @@ def schema(request, monkeypatch, fixture_db_path, old_schema_db_path):
     path = fixture_db_path if request.param == "new" else old_schema_db_path
     monkeypatch.setattr(db, "DB_PATH", path)
     yield request.param
+
+
+@pytest.fixture
+def workspace_db(tmp_path, monkeypatch):
+    """A workspace database (chats, projects, boards) of its own for one test."""
+    from api import workspace
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'workspace.db'}")
+    workspace._engines.clear()
+    yield
+    for eng in workspace._engines.values():
+        eng.dispose()
+    workspace._engines.clear()

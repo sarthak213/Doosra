@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+backend/.venv
+backend/.env
+backend/data
+backend/tests
+frontend/node_modules
+frontend/dist
+*.duckdb

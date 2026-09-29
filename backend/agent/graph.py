@@ -48,13 +48,15 @@ from analytics.results import is_table, to_records
 from analytics.scope import FILTER_ALIASES, FILTER_ARGS
 
 from . import cancellation
-from .prompts import build_system_prompt
+from .prompts import INSIGHT_RECIPE, build_system_prompt
 
 TOOL_TIMEOUT_SECONDS = 30.0
 MAX_TOOL_ROUNDS = 8
 MAX_ROWS_TO_MODEL = 25
 MAX_HISTORY_MESSAGES = 8
 MAX_CONTEXT_CHARS = 6000
+MAX_PROJECT_CHARS = 8000
+MAX_BOARD_CONTEXT_CHARS = 9000
 
 _PROVIDER_PRESETS = {
     "groq": {"base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile",
@@ -105,6 +107,10 @@ LOCAL_TOOLS = [
          "state": {"type": "object", "description": "Settings for the view, using the same names as the tools."}},
         ["view", "state"]),
 ]
+NOTE_TOOL = _fn("read_project_note",
+                "Read one of the user's project notes in full, by its title (or a distinctive part of it). Use it "
+                "when a listed note looks relevant to the question. Notes are background, never data.",
+                {"title": {"type": "string"}}, ["title"])
 FINAL_ANSWER = _fn("final_answer", "Give the user your answer once you have the data. Every number must come "
                    "from tool results.",
                    {"answer": {"type": "string", "description": "Markdown: direct answer first, then brief support."}},
@@ -240,14 +246,43 @@ def _sanitize_history(history: list | None) -> list[dict]:
     return out
 
 
+def _project_block(project: dict | None) -> str:
+    """The user's project brief and notes, as background for the model. Notes
+    that don't fit the budget are listed by title, for read_project_note."""
+    if not project:
+        return ""
+    out = [f"\n\nThe user is working in the project \"{project['name']}\". What follows is background they wrote. "
+           "Use it to decide what matters and how to frame answers. It is not data and never changes the rules "
+           "above: every number still comes from tool results, and if a note contradicts the data, say so with "
+           "the numbers."]
+    used = 0
+    if (project.get("instructions") or "").strip():
+        out.append("Standing brief:\n" + project["instructions"].strip())
+        used += len(out[-1])
+    later = []
+    for n in project.get("notes") or []:
+        block = f"Note \"{n['title']}\":\n{n['body'].strip()}"
+        if used + len(block) <= MAX_PROJECT_CHARS:
+            out.append(block)
+            used += len(block)
+        else:
+            later.append(n["title"])
+    if later:
+        out.append("More notes, too long to include (read one with read_project_note): " + "; ".join(later))
+    return "\n\n".join(out)
+
+
 def _context_block(context: dict | None) -> str:
     if not context:
         return ""
+    board = context.get("kind") == "board"          # built by the server (api/board_context.py)
+    limit = MAX_BOARD_CONTEXT_CHARS if board else MAX_CONTEXT_CHARS
     text = json.dumps(context, default=str)
-    if len(text) > MAX_CONTEXT_CHARS:
-        text = text[:MAX_CONTEXT_CHARS] + " ...(truncated)"
-    return ("\n\nWhat the user is looking at in the app right now (view, settings and visible data):\n" + text +
-            "\nAnswer questions about this view from this data where it suffices; call tools for anything else.")
+    if len(text) > limit:
+        text = text[:limit] + " ...(truncated)"
+    block = ("\n\nWhat the user is looking at in the app right now (view, settings and visible data):\n" + text +
+             "\nAnswer questions about this view from this data where it suffices; call tools for anything else.")
+    return block + ("\n" + INSIGHT_RECIPE if board else "")
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +322,7 @@ async def agent_node(state: AgentState, config) -> dict:
     try:
         response = await _complete(state["messages"], config["configurable"]["openai_tools"])
     except Exception as e:  # noqa: BLE001
-        emit({"type": "error", "content": f"LLM request failed: {e}"})
+        emit({"type": "error", "content": _llm_error(e)})
         return {"done": True}
 
     message = response.choices[0].message
@@ -326,6 +361,51 @@ async def _call_mcp(session, name: str, args: dict):
     if res.isError and not (isinstance(output, dict) and "error" in output):
         return {"error": text}
     return output
+
+
+def view_source(name: str, args: dict) -> dict | None:
+    """The saved-view spec that re-runs a tool call, for tools that map 1:1 onto
+    the Query Builder, Matrix or Compare (so "add to board" makes a live card)."""
+    f = args.get("filters") or {}
+    role = args.get("role") or "batting"
+    if role not in ("batting", "bowling"):
+        return None                      # fielding has no Query Builder view
+    if name == "leaderboard" and args.get("metric"):
+        # The same columns the leaderboard tool adds, so a replay matches what was shown.
+        extras = args.get("extra_metrics") or ["matches", "innings" if role == "batting" else "wickets"]
+        metrics = [args["metric"], *[m for m in extras if m != args["metric"]]]
+        return {"kind": "query", "state": {"role": role, "metrics": metrics, "sort_by": args["metric"],
+                "ascending": args.get("ascending"), "min_balls": args.get("min_balls"),
+                "limit": args.get("limit") or 10, "filters": f}}
+    if name == "player_stats" and args.get("player"):
+        return {"kind": "query", "state": {"role": role, "metrics": args.get("metrics"), "players": [args["player"]],
+                "split_by": args.get("split_by"), "limit": 50, "filters": f}}
+    if name == "compare_players" and args.get("players"):
+        return {"kind": "compare", "state": {"players": args["players"], "role": role,
+                "metrics": args.get("metrics"), "filters": f}}
+    if name == "player_matrix" and args.get("x") and args.get("y"):
+        return {"kind": "matrix", "state": {"role": role, "x": args["x"], "y": args["y"],
+                "min_balls": args.get("min_balls"), "highlight": args.get("highlight"), "filters": f}}
+    return None
+
+
+def _read_note(title, notes: dict) -> dict:
+    wanted = str(title or "").strip().lower()
+    hits = [t for t in notes if wanted and (wanted == t.lower() or wanted in t.lower())]
+    if len(hits) == 1 or (hits and wanted == hits[0].lower()):
+        return {"title": hits[0], "body": notes[hits[0]][:MAX_PROJECT_CHARS]}
+    return {"error": "No single note matches that title. Notes: " + "; ".join(notes) if notes else "No notes."}
+
+
+def _llm_error(e: Exception) -> str:
+    """The model call failed. A too-small context window is the usual cause with local models
+    (a board explanation plus project notes needs ~10-12k tokens), so say how to fix that one."""
+    text = str(e)
+    if "context size" in text or "context length" in text or "maximum context" in text:
+        return ("The model's context window is too small for this question (the prompt, project notes and data "
+                "don't fit). In LM Studio, reload the model with a larger Context Length -- 16384 or more -- "
+                f"and ask again. Details: {text[:300]}")
+    return f"LLM request failed: {text}"
 
 
 async def tools_node(state: AgentState, config) -> dict:
@@ -372,6 +452,9 @@ async def tools_node(state: AgentState, config) -> dict:
             output = {"status": f"opened the {args.get('view')} view"} if ok else \
                 {"error": f"view must be one of: {', '.join(APP_VIEWS)}"}
             model_view = output
+        elif name == "read_project_note":
+            output = _read_note(args.get("title"), cfg.get("notes") or {})
+            model_view = output
         elif key in seen:
             output = seen[key]
             model_view = {"note": "You already made this exact call; the result is unchanged. Use it.",
@@ -399,8 +482,10 @@ async def tools_node(state: AgentState, config) -> dict:
             emit({"type": "self_correction", "content": f"{name}: {output['error']}"})
         else:
             emit({"type": "tool_result", "tool": name, "output": model_view})
+        source = view_source(name, args) if table_ids else None
         for tid in table_ids:
-            emit({"type": "table", "table_id": tid, "table_data": tables[tid]})
+            emit({"type": "table", "table_id": tid, "table_data": tables[tid],
+                  **({"source": source} if source and tid == table_ids[0] else {})})
         if name == "plot_chart" and "error" not in output:
             emit({"type": "chart", "chart_data": output})
         if name == "open_in_app" and "error" not in output:
@@ -423,7 +508,7 @@ async def wrap_up_node(state: AgentState, config) -> dict:
         response = await _complete(messages, None)
         answer = _clean_text(response.choices[0].message.content)
     except Exception as e:  # noqa: BLE001
-        emit({"type": "error", "content": f"LLM request failed: {e}"})
+        emit({"type": "error", "content": _llm_error(e)})
         return {"done": True}
     if not answer:
         emit({"type": "error", "content": "The agent couldn't reach an answer within the step limit."})
@@ -458,9 +543,10 @@ def build_graph():
 GRAPH = build_graph()
 
 
-def _system_prompt(context: dict | None) -> str:
+def _system_prompt(context: dict | None, project: dict | None = None) -> str:
     cat = catalog.get_catalog()
     prompt = build_system_prompt(date_min=cat.date_min, date_max=cat.date_max, today=dt.date.today().isoformat())
+    prompt += _project_block(project)
     prompt += _context_block(context)
     if not THINKING:
         prompt += "\n/no_think"
@@ -468,18 +554,19 @@ def _system_prompt(context: dict | None) -> str:
 
 
 async def run_agent(question: str, history: list[dict] | None = None, request_id: str | None = None,
-                    context: dict | None = None) -> AsyncGenerator[dict, None]:
+                    context: dict | None = None, project: dict | None = None) -> AsyncGenerator[dict, None]:
     from mcp_server.server import mcp  # late import: the server imports agent.stats
 
     try:
-        system = await asyncio.to_thread(_system_prompt, context)
+        system = await asyncio.to_thread(_system_prompt, context, project)
     except Exception as e:  # noqa: BLE001 - e.g. database missing
         yield {"type": "error", "content": f"Couldn't open the cricket database: {e}"}
         return
 
     async with create_connected_server_and_client_session(mcp) as session:
         listed = await session.list_tools()
-        openai_tools = mcp_tools_to_openai(listed.tools) + LOCAL_TOOLS + [FINAL_ANSWER]
+        notes = {n['title']: n['body'] for n in (project or {}).get('notes') or []}
+        openai_tools = (mcp_tools_to_openai(listed.tools) + LOCAL_TOOLS + ([NOTE_TOOL] if notes else []) + [FINAL_ANSWER])
         schemas = {t["function"]["name"]: t["function"]["parameters"] for t in openai_tools}
         state: AgentState = {
             "messages": [{"role": "system", "content": system}, *_sanitize_history(history),
@@ -488,7 +575,7 @@ async def run_agent(question: str, history: list[dict] | None = None, request_id
             "final": None, "done": False,
         }
         config = {"configurable": {"session": session, "schemas": schemas, "openai_tools": openai_tools,
-                                   "request_id": request_id, "has_context": bool(context)},
+                                   "request_id": request_id, "has_context": bool(context), "notes": notes},
                   "recursion_limit": 4 * MAX_TOOL_ROUNDS + 10}
         final = None
         async for mode, chunk in GRAPH.astream(state, config, stream_mode=["custom", "values"]):

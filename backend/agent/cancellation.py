@@ -20,3 +20,17 @@ def is_cancelled(request_id: str | None) -> bool:
 
 def clear(request_id: str | None) -> None:
     _cancelled_ids.discard(request_id)
+    _owners.pop(request_id, None)
+
+
+# Who started each request, so one signed-in user can't cancel another's answer.
+_owners: dict[str, str] = {}
+
+
+def set_owner(request_id: str | None, user: str) -> None:
+    if request_id:
+        _owners[request_id] = user
+
+
+def may_cancel(request_id: str, user: str) -> bool:
+    return _owners.get(request_id, user) == user

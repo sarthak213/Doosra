@@ -39,3 +39,22 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  # The hosted image: builds, starts (without downloading the database) and answers.
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t doosra .
+      - name: Smoke test
+        run: |
+          docker run -d --name doosra -p 8000:8000 -e SKIP_DB_PULL=1 -e SESSION_SECRET=$(head -c 48 /dev/urandom | base64 | tr -d '\n=+/') \
+            -e PUBLIC_URL=http://localhost:8000 -e ADMIN_EMAILS=ci@example.com doosra
+          for i in $(seq 1 30); do curl -sf localhost:8000/health && break; sleep 2; done
+          curl -sf localhost:8000/health | grep '"status":"ok"'
+          curl -sf localhost:8000/api/me | grep '"user":null'                 # signed out
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/api/projects)" = 401
+          curl -sf localhost:8000/ask/some-chat | grep -i '<title>'           # the app, for a client-side route
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/mcp)" = 404   # MCP is not served when hosted
+      - if: failure()
+        run: docker logs doosra

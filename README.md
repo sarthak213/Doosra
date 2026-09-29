@@ -31,6 +31,7 @@ backend/
 │   ├── fibs.py             #   the FIBS study: what's skill, what's luck
 │   ├── coverage.py         #   what the data covers and what it's missing
 │   ├── registry.py         #   the metric registry: every metric declared once
+│   ├── insights.py         #   deterministic facts about a chart's data (for board explanations)
 │   ├── engine.py           #   query builder: stats, splits, form, arcs, percentiles, matrix...
 │   └── results.py          #   the result envelope + formatting/highlight helpers
 ├── mcp_server/             # every capability as an MCP tool (stdio or HTTP at /mcp)
@@ -40,11 +41,22 @@ backend/
 │   ├── stats.py            #   team/venue/matchup/records tools (ball-level SQL)
 │   ├── tools.py            #   guarded run_sql, schema guide, autocomplete search
 │   └── cancellation.py     #   in-flight request cancellation
-├── api/                    # REST endpoints behind the UI views + saved views/watchlist
+├── api/                    # REST endpoints behind the UI views
+│   ├── workspace.py        #   chats, projects, notes, boards, saved views (SQLite, or Postgres)
+│   ├── migrations.py       #   the workspace schema and its forward-only migrations
+│   ├── chat_persist.py     #   saving a chat turn as it streams; history rebuilt for the model
+│   ├── board_context.py    #   what the AI is told when it explains a board
+│   ├── auth.py             #   hosted sign-in gate, invites, per-user AI quotas
+│   ├── auth_routes.py      #   Google/GitHub OAuth, sign-out, /api/me, invite admin
+│   └── admin.py            #   `python -m api.admin invite|revoke|list`
+├── ingest/refresh.py       # hosted: keeps the database on the latest published build
 ├── tests/                  # pytest suite (both DB schemas) + eval questions
-└── main.py                 # FastAPI app: /api, /mcp, SSE chat streams
+├── docker-entrypoint.sh    # container start: fetch the database, then serve
+└── main.py                 # FastAPI app: /api, /mcp, SSE chat streams, the built frontend when hosted
 
-frontend/                   # React app: Player Hub, Compare, Query, Matrix, FIBS, Data, Ask + copilot drawer
+Dockerfile                  # the hosted image: API + built React app on one origin
+
+frontend/                   # React app: Player Hub, Compare, Query, Matrix, FIBS, Data, Ask workspace + copilot drawer
 ```
 
 The UI, the copilot and external MCP clients all go through the same engine,
@@ -261,6 +273,44 @@ whether a number is right is deterministic, tested code:
 - **Stated assumptions.** Every result carries the filters it used and notes
   (what a name resolved to, qualification thresholds, defaults, coverage).
 
+## The Ask workspace
+
+The Ask tab is a workspace, with a sidebar like Claude's:
+
+- **Saved chats.** Every conversation is stored on the server with the tables,
+  charts and reasoning steps it showed, so reopening one looks exactly as it
+  did. Rename, move, search (titles and message text) and delete from the
+  sidebar. The server rebuilds each chat's history for the model, including a
+  short note of the tables earlier answers showed, so "now split that by phase"
+  has the numbers. (A conversation kept in the browser by v2.2 and earlier is
+  imported once, as "Imported chat".)
+- **Projects** group chats and boards and carry context the AI reads: a
+  *standing brief*, and *notes*, typed or imported from a `.md`, `.txt` or
+  `.csv` file (up to 20,000 characters each; switch a note off to hide it from
+  the AI). The brief and enabled notes go into the system prompt as
+  background, never as data: every number still comes from a tool, and if a
+  note contradicts the data the AI says so with the numbers. Past about 8,000
+  characters, notes are listed by title and read on demand. Export a project as
+  JSON and import it elsewhere from the sidebar.
+- **Boards** ("custom views") are named sets of chart cards. Build a card from
+  a Query, Matrix or Compare (or start from a saved view), choose bar, line,
+  scatter or table, and see the live preview. Cards are re-run against the
+  current data every time the board opens. Under any table or chart the AI
+  shows there is **Add to board**: if the answer came from a query, matrix or
+  compare it becomes a live card, otherwise a static snapshot (labelled as such).
+- **Explain.** "Explain this view" (or a card's Explain) opens a saved chat in
+  the project. The *server* loads the board you own, re-runs every card and
+  computes a digest from the numbers: leaders and laggards, spread, outliers,
+  trend, correlation, thin samples, and, for raw rate metrics, how far each
+  player's figure moves once regressed toward the league (the FIBS lens on skill
+  versus luck). The model interprets that digest; numbers the browser sends
+  about a board are ignored. There is also an Explain button under every chart
+  and table in an answer, and follow-up questions keep the board attached.
+
+Everything lives in `data/workspace.db` (SQLite) next to the cricket database,
+scoped to a user id (`local` when running locally). Set `DATABASE_URL` to use
+Postgres instead.
+
 ## The copilot
 
 `agent/graph.py` is a LangGraph state machine (`agent` → `tools` → `agent`...,
@@ -361,6 +411,54 @@ folder.
 - **Tools report the analytics tables aren't built**: run
   `python -m analytics.build` from `backend/`.
 
+## Hosting (invite-only)
+
+Locally nothing changes: no sign-in, one implicit user, MCP on. Setting
+`AUTH_MODE=oauth` turns on the hosted behaviour:
+
+- **Sign-in with Google or GitHub** (no passwords are ever handled). Only
+  emails you invite can get in; `ADMIN_EMAILS` are always admitted and can
+  manage invites from the account menu (or `python -m api.admin invite <email>`).
+  The session is a signed, HttpOnly cookie; revoking an invite ends that
+  person's session on their next request.
+- **Everything is per user.** Chats, projects, notes, boards, saved views and
+  the watchlist are scoped to the signed-in user in the storage layer, and the
+  tests check every route against a second user.
+- **AI is metered.** `AI_DAILY_QUESTIONS` per user (30 by default when hosted)
+  and an optional `AI_GLOBAL_DAILY_QUESTIONS` ceiling for the whole instance,
+  counted in the database so they hold across restarts and instances.
+- **The MCP endpoint is not served** (it has no sign-in); the copilot's own
+  in-process tool access is unaffected.
+- **One container, one origin.** The `Dockerfile` builds the React app and
+  serves it from the API, so there are no cross-site cookies or CORS. The
+  cricket database is not in the image: on first start the entrypoint downloads
+  the latest validated build from this repository's Releases into the data
+  volume, and `DATA_REFRESH_HOURS` (24 by default) checks for a newer one and
+  swaps it in without a restart.
+
+```bash
+docker build -t doosra .
+docker run -p 8000:8000 --env-file backend/.env.hosted -v doosra-data:/app/backend/data doosra
+```
+
+To try the image on your own machine without setting up sign-in, run it in
+local mode (one implicit user, no OAuth, the app served on port 8000; the MCP
+endpoint is off in this mode):
+
+```bash
+docker run -p 8000:8000 -e AUTH_MODE=none -e SERVE_FRONTEND=1 -e GROQ_API_KEY=... -v doosra-data:/app/backend/data doosra
+```
+
+Every setting is documented in `backend/.env.hosted.example`. Chats and
+projects live in SQLite inside the data volume by default (one instance, a
+persistent disk) or in Postgres if `DATABASE_URL` is set (required for hosts
+with an ephemeral disk or more than one instance). Budget about 2 GB of RAM:
+the analytics queries run over a database of roughly 700 MB.
+
+GitHub Pages can't host this: it serves static files only, and Doosra needs
+the API and a database. (A landing page there is possible.) The CI `container`
+job builds the image and smoke-tests it on every push.
+
 ## Security notes
 
 `run_sql` only permits `SELECT`/`WITH` statements and rejects write keywords
@@ -369,14 +467,18 @@ false-positive). Every connection is read-only **with external access
 disabled**, so `read_csv`/`read_text` can't read server files from a SELECT.
 Filter values reaching SQL are resolved database values or validated
 integers, inlined as escaped literals. Saved views and the watchlist live in
-a separate SQLite file (`data/workspace.db`). The rate limiter and
-cancellation registry are per-process; a public deployment needs shared ones.
+a separate SQLite file (`data/workspace.db`); every workspace query is scoped
+to the owning user, so one user can't read or change another's chats, notes or
+boards (there is one implicit user, `local`, unless hosted sign-in is on). Project
+notes are the user's own text and are framed to the model as background that
+cannot change the rules. The rate limiter and cancellation registry are
+per-process; a public deployment needs shared ones.
 
 ## Tests and eval
 
 ```bash
 cd backend
-pytest                  # ~530 tests: ingest, release pipeline, coverage, scoring rules, FIBS, engine, API, MCP, agent graph
+pytest                  # ~670 tests: ingest, release pipeline, coverage, scoring rules, FIBS, engine, API, workspace, auth, hosting, MCP, agent graph
 pytest -m llm           # LLM-in-the-loop eval (needs a model endpoint)
 ```
 
@@ -394,7 +496,6 @@ values computed by independent SQL, checked against the real database.
 
 ## Next steps
 
-- Ask sidebar: saved chat history, projects, and saved custom views
 - Match Centre (worm, Manhattan, win-probability model, key moments, impact)
 - Matchup grid + auto-written pre-match reports
 - Venue, team and tournament dashboards; a scouting board with league-strength adjustment

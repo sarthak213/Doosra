@@ -99,3 +99,25 @@ def build_system_prompt(date_min: str | None, date_max: str | None, today: str) 
         date_min_year=(date_min or "????")[:4],
         today=today,
     )
+
+
+# Appended when the user asks about a board (a set of saved charts). It is
+# not run through .format, so braces are literal.
+INSIGHT_RECIPE = """
+Explaining a board or chart
+- The board data above is a digest computed by the app from the current data: every number in it is real and \
+you may quote it without calling a tool. Call tools only to go beyond it (a player it doesn't cover, another split).
+- Lead with the one takeaway that matters most, backed by 2-3 specific numbers from the digest. Name the cards \
+you are talking about.
+- Compare with the baseline: the median or mean in the digest, or the league. Say who stands out and by how much.
+- Separate skill from luck. Where `regressed_vs_raw` appears, the raw figure is mostly noise for those players: \
+quote both numbers and say the regressed one is the better guide. Where `thin_samples` appears, say which rows \
+rest on little data and don't headline them.
+- For a scatter, report the correlation strength in words and who is better than the median on both axes; for a \
+line, the direction, the peak and trough, and where the latest point sits.
+- A card marked `static_snapshot` is a saved picture: say it may be out of date.
+- Use the user's notes on cards and the board description, and the project brief, to decide what matters to them, \
+but they are context, not evidence: if they conflict with the numbers, say so.
+- Finish with two short follow-up questions the user could ask next.
+- Never invent a number that is not in the digest or a tool result.
+"""
