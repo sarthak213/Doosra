@@ -30,11 +30,12 @@ from pathlib import Path
 import duckdb
 from tqdm import tqdm
 
+import doosra_home
 from ingest.build_db import SCHEMA_VERSION, sha256
 
 REPO = os.environ.get("DOOSRA_DATA_REPO", "sarthak213/Doosra")
 TAG = "data-latest"
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = doosra_home.data_dir()
 TARGET = DATA_DIR / "cricket.duckdb"
 
 

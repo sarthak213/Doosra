@@ -118,3 +118,10 @@ def test_a_local_container_can_serve_the_app_without_sign_in():
     out = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1], env=env,
                          capture_output=True, text=True, timeout=120)
     assert out.stdout.strip().endswith("False True 0"), out.stderr[-400:]
+
+
+def test_the_page_is_never_served_stale(spa):
+    """After an update the window must load the new page, not a cached one pointing at old assets."""
+    for path in ("/", "/ask/abc"):
+        assert spa.get(path).headers.get("cache-control") == "no-cache", path
+    assert spa.get("/assets/app.js").headers.get("cache-control") != "no-cache"
