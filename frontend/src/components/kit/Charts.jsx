@@ -1,4 +1,6 @@
 import {
+  Bar,
+  BarChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -78,6 +80,48 @@ export function LineChartKit({ data, x, series, references = [], height = 280, x
               ) : null) : undefined} />
           ))}
         </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// Categories on one axis, one or more series as grouped bars (comparisons:
+// players, teams, seasons). Bars are thin with rounded data-ends, a surface-
+// coloured 2px stroke keeps neighbours apart, and long category lists turn
+// horizontal so labels stay readable. One value axis only.
+export function BarChartKit({ data, x, series, height = 280, xLabel, yLabel, horizontal }) {
+  if (!data?.length) return null;
+  const sideways = horizontal ?? data.length > 8;
+  const h = sideways ? Math.max(height, data.length * (series.length * 14 + 12) + 48) : height;
+  const legend = series.length > 1;
+  return (
+    <div className="chart-block">
+      {legend && <Legend items={series.map((s, i) => ({ label: s.label, color: s.color || SERIES[i] }))} />}
+      <ResponsiveContainer width="100%" height={h}>
+        <BarChart data={data} layout={sideways ? "vertical" : "horizontal"} barCategoryGap="22%" barGap={2}
+          margin={{ top: 10, right: 24, left: 4, bottom: xLabel ? 22 : 4 }}>
+          <CartesianGrid stroke={GRID} horizontal={!sideways} vertical={sideways} />
+          {sideways ? (
+            <>
+              <XAxis type="number" stroke={AXIS_TEXT} tick={TICK} tickLine={false} axisLine={false}
+                label={yLabel ? { value: yLabel, position: "insideBottom", offset: -2, fill: AXIS_TEXT, fontSize: 11 } : undefined} />
+              <YAxis type="category" dataKey={x} stroke={AXIS_TEXT} tick={TICK} tickLine={false} width={120} interval={0} />
+            </>
+          ) : (
+            <>
+              <XAxis dataKey={x} stroke={AXIS_TEXT} tick={TICK} tickLine={false} interval={0} minTickGap={8}
+                label={xLabel ? { value: xLabel, position: "insideBottom", offset: -10, fill: AXIS_TEXT, fontSize: 11 } : undefined} />
+              <YAxis stroke={AXIS_TEXT} tick={TICK} tickLine={false} axisLine={false} width={52}
+                label={yLabel ? { value: yLabel, angle: -90, position: "insideLeft", fill: AXIS_TEXT, fontSize: 11 } : undefined} />
+            </>
+          )}
+          <Tooltip {...TOOLTIP} cursor={{ fill: "rgba(241,232,214,0.06)" }}
+            formatter={(v, name) => [formatValue(v, name), series.find((s) => s.key === name)?.label || humanize(name)]} />
+          {series.map((s, i) => (
+            <Bar key={s.key} dataKey={s.key} name={s.key} fill={s.color || SERIES[i]} stroke="#16281d" strokeWidth={2}
+              radius={sideways ? [0, 4, 4, 0] : [4, 4, 0, 0]} maxBarSize={28} isAnimationActive={false} />
+          ))}
+        </BarChart>
       </ResponsiveContainer>
     </div>
   );

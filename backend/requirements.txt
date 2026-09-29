@@ -8,6 +8,10 @@ openai>=1.51.0
 python-dotenv>=1.0.1
 mcp>=1.9,<2  # 2.x changed the in-memory client-session API used by agent/graph.py
 langgraph>=0.4,<2
+sqlalchemy>=2.0,<3           # the workspace (chats, projects, boards)
+psycopg[binary]>=3.1         # only used when DATABASE_URL points at Postgres (hosted)
+authlib>=1.3                 # hosted sign-in (Google / GitHub)
+itsdangerous>=2.1            # signed session cookies
 
 # tests
 pytest>=8.0

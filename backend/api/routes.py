@@ -19,9 +19,9 @@ from pydantic import BaseModel, Field
 from analytics import catalog, coverage, engine, registry
 from analytics.scope import normalize_filters
 
-from . import workspace
+from .auth import current_user
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(current_user)])   # a session when hosted; nothing locally
 
 Role = Literal["batting", "bowling"]
 
@@ -220,42 +220,3 @@ def matrix(body: MatrixBody):
     return _ok(engine.scatter(role=body.role, x=body.x, y=body.y, min_balls=body.min_balls,
                               highlight=body.highlight, **f))
 
-
-# ---------------------------------------------------------------------------
-# Workspace: saved views and watchlist
-# ---------------------------------------------------------------------------
-
-class ViewBody(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    kind: Literal["query", "matrix", "compare", "player"]
-    state: dict
-
-
-@router.get("/views")
-def list_views(kind: str | None = None):
-    return {"views": workspace.list_views(kind)}
-
-
-@router.post("/views")
-def save_view(body: ViewBody):
-    return workspace.save_view(body.name, body.kind, body.state)
-
-
-@router.delete("/views/{view_id}")
-def delete_view(view_id: str):
-    workspace.delete_view(view_id)
-    return {"status": "deleted"}
-
-
-class WatchlistBody(BaseModel):
-    players: list[str]
-
-
-@router.get("/watchlist")
-def get_watchlist():
-    return {"players": workspace.get_watchlist()}
-
-
-@router.put("/watchlist")
-def put_watchlist(body: WatchlistBody):
-    return {"players": workspace.set_watchlist(body.players)}

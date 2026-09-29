@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+import { API_BASE } from "../api.js";
 
 export default function InputBar({ onAsk, onCancel, disabled, placeholder }) {
   const [value, setValue] = useState("");

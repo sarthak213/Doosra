@@ -227,3 +227,73 @@ class TestHistory:
             {"role": "user", "content": "q1"},
             {"role": "assistant", "content": "a1"},
         ]
+
+
+def run_in_project(project, question="q"):
+    async def go():
+        return [e async for e in graph.run_agent(question, project=project)]
+    return asyncio.run(go())
+
+
+class TestProjectContext:
+    PROJECT = {"name": "IPL auction", "instructions": "Scouting death bowlers for 2027.",
+               "notes": [{"title": "Budget", "body": "We can spend at most 4 crore."}]}
+
+    def test_brief_and_notes_reach_the_system_prompt_with_the_grounding_rule(self, scripted):
+        sent = scripted(_reply(calls=[_call("leaderboard", metric="runs"), _call("final_answer", answer="x")]))
+        run_in_project(self.PROJECT)
+        system = sent[0]["messages"][0]["content"]
+        assert "Scouting death bowlers for 2027." in system and "at most 4 crore" in system
+        assert "every number still comes from tool results" in system
+        assert "read_project_note" in {t["function"]["name"] for t in sent[0]["tools"]}
+
+    def test_no_project_means_no_block_and_no_note_tool(self, scripted):
+        sent = scripted(_reply(calls=[_call("leaderboard", metric="runs"), _call("final_answer", answer="x")]))
+        run_in_project(None)
+        assert "working in the project" not in sent[0]["messages"][0]["content"]
+        assert "read_project_note" not in {t["function"]["name"] for t in sent[0]["tools"]}
+
+    def test_notes_over_budget_are_listed_and_readable_on_demand(self, scripted):
+        big = {"name": "P", "instructions": "", "notes": [
+            {"title": "Small", "body": "tiny"}, {"title": "Huge dossier", "body": "z" * (graph.MAX_PROJECT_CHARS + 10)}]}
+        sent = scripted(
+            _reply(calls=[_call("read_project_note", title="huge")]),
+            _reply(calls=[_call("leaderboard", metric="runs"), _call("final_answer", answer="done")]),
+        )
+        run_in_project(big)
+        system = sent[0]["messages"][0]["content"]
+        assert "tiny" in system and "zzzz" not in system and "Huge dossier" in system
+        assert tool_messages(sent[1])[0]["title"] == "Huge dossier"
+
+    def test_unknown_note_lists_titles(self):
+        out = graph._read_note("nothing", {"A": "a", "B": "b"})
+        assert "A; B" in out["error"]
+
+
+class TestTableSource:
+    def test_leaderboard_table_carries_a_rerunnable_query_source(self, scripted):
+        scripted(_reply(calls=[_call("leaderboard", metric="runs", limit=3, filters={"format": "T20"})]),
+                 _reply(calls=[_call("final_answer", answer="x")]))
+        table = of_type(run(), "table")[0]
+        assert table["source"] == {"kind": "query", "state": {
+            "role": "batting", "metrics": ["runs", "matches", "innings"], "sort_by": "runs", "ascending": None, "min_balls": None,
+            "limit": 3, "filters": {"format": "T20"}}}
+
+    def test_source_is_the_view_spec_of_each_mapped_tool(self):
+        assert graph.view_source("player_matrix", {"x": "average", "y": "strike_rate"})["kind"] == "matrix"
+        assert graph.view_source("compare_players", {"players": ["A", "B"]})["state"]["players"] == ["A", "B"]
+        assert graph.view_source("player_stats", {"player": "V Kohli", "split_by": "season"})["state"]["players"] == ["V Kohli"]
+        assert graph.view_source("run_sql", {"query": "select 1"}) is None
+
+    def test_the_source_replays_through_render_card(self, scripted):
+        from api import workspace_routes
+        scripted(_reply(calls=[_call("leaderboard", metric="runs", limit=2)]), _reply(calls=[_call("final_answer", answer="x")]))
+        table = of_type(run(), "table")[0]
+        replay = workspace_routes.render_source(table["source"])
+        assert replay["rows"] == table["table_data"]["rows"]
+
+
+def test_a_context_overflow_says_how_to_fix_it():
+    msg = graph._llm_error(RuntimeError("Error code: 400 - request (9964 tokens) exceeds the available context size (8704 tokens)"))
+    assert "Context Length" in msg and "16384" in msg and "9964" in msg
+    assert graph._llm_error(RuntimeError("timeout")) == "LLM request failed: timeout"

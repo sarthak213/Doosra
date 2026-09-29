@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { API_BASE } from "../api.js";
+import UserMenu from "./UserMenu.jsx";
 import Wordmark from "./Wordmark.jsx";
 
 function formatCount(n) {
@@ -51,6 +52,7 @@ export default function Masthead() {
           <dd>{formatCount(stats?.deliveries)}</dd>
         </div>
       </dl>
+      <UserMenu />
     </header>
   );
 }
