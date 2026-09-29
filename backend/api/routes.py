@@ -38,11 +38,13 @@ def filter_params(
     season: str | None = None, from_year: int | None = None, to_year: int | None = None,
     phase: str | None = None, innings: int | None = None,
     position: str | None = None, entry_phase: str | None = None, entry_wickets: str | None = None,
+    result: str | None = None,
 ) -> dict:
     return normalize_filters({
         "competition": competition, "format": format, "gender": gender, "team": team, "opposition": opposition,
         "venue": venue, "season": season, "from_year": from_year, "to_year": to_year, "phase": phase,
         "innings": innings, "position": position, "entry_phase": entry_phase, "entry_wickets": entry_wickets,
+        "result": result,
     })
 
 

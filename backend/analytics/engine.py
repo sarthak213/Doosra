@@ -36,6 +36,11 @@ MAX_LIMIT = 200
 _TABLES = {(BAT, False): "batting_innings", (BAT, True): "batting_phase",
            (BOWL, False): "bowling_innings", (BOWL, True): "bowling_phase"}
 
+# The match result from the player's side. The per-innings tables fold draws and ties into
+# "no result"; the matches table tells them apart.
+RESULT_SQL = ("CASE WHEN m.result <> 'no result' THEN m.result ELSE (SELECT CASE mt.result WHEN 'draw' THEN 'drawn' "
+              "WHEN 'tie' THEN 'tied' ELSE 'no result' END FROM matches mt WHERE mt.match_id = m.match_id) END")
+
 _ENTRY_PHASE = ("CASE WHEN m.fgroup = 'T20' THEN (CASE WHEN m.entry_over < 6 THEN 'powerplay' "
                 "WHEN m.entry_over < 15 THEN 'middle' ELSE 'death' END) "
                 "WHEN m.fgroup = 'ODI' THEN (CASE WHEN m.entry_over < 10 THEN 'powerplay' "
@@ -54,7 +59,7 @@ _DIMENSION_SQL = {
     "innings": "CAST(m.innings_num AS VARCHAR)",
     "chase": ("CASE WHEN m.fgroup = 'MULTI' THEN 'innings ' || m.innings_num "
               "WHEN m.innings_num = 1 THEN 'setting' ELSE 'chasing' END"),
-    "result": "m.result",
+    "result": RESULT_SQL,
     "phase": "m.phase",
     "position": "CAST(m.position AS VARCHAR)",
     "entry_wickets": "CASE WHEN m.entry_wkts >= 5 THEN '5+' ELSE CAST(CAST(m.entry_wkts AS INTEGER) AS VARCHAR) END",
@@ -106,7 +111,7 @@ def _table(role: str, scope: Scope, phase_mode: bool | None = None) -> str:
 
 
 def _where(scope: Scope, players: list[str] | None = None, extra: list[str] | None = None) -> str:
-    c = scope.match_clauses(batting_innings=True) + scope.batting_clauses(_ENTRY_PHASE)
+    c = scope.match_clauses(batting_innings=True) + scope.batting_clauses(_ENTRY_PHASE) + scope.result_clauses(RESULT_SQL)
     if scope.team:
         c.append(f"m.team IN {lit_list(scope.team)}")
     if scope.opposition:

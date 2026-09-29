@@ -188,6 +188,11 @@ second innings), limited overs have two (setting, chasing). Season also takes
 `latest` -- the most recent season of whatever else is filtered ("this IPL").
 Competition, team and venue inputs suggest as you type.
 
+**Match result** (won, lost, drawn, tied, no result) keeps only the matches
+with that result from the player's side ("Kohli in ODI wins", "Sachin in lost
+Tests"), for batting and bowling; splitting by result shows all of them side by
+side, with draws and ties told apart from no-results.
+
 Batting views add three filters on how the batter came in, for like-for-like
 comparisons (a finisher against finishers, not against openers): **batting
 position** (a number, a range such as `1-3` or `5+`, or openers / top order /
@@ -518,7 +523,7 @@ per-process; a public deployment needs shared ones.
 
 ```bash
 cd backend
-pytest                  # ~715 tests: ingest, release pipeline, coverage, scoring rules, FIBS, engine, API, workspace, auth, hosting, MCP, agent graph
+pytest                  # ~720 tests: ingest, release pipeline, coverage, scoring rules, FIBS, engine, API, workspace, auth, hosting, MCP, agent graph
 pytest -m llm           # LLM-in-the-loop eval (needs a model endpoint)
 ```
 

@@ -144,10 +144,25 @@ class TestBattingRoleFilters:
 
     def test_views_on_ball_data_refuse_them_instead_of_ignoring_them(self):
         s = build_scope(position="4")
-        with pytest.raises(ResolutionError, match="batting figures"):
+        with pytest.raises(ResolutionError, match="player figures"):
             s.match_clauses()
         assert s.match_clauses(batting_innings=True) == []        # the per-innings views apply them themselves
 
     def test_aliases(self):
         from analytics.scope import normalize_filters
         assert normalize_filters({"batting_position": "1-3", "wickets_down": "0"}) == {"position": "1-3", "entry_wickets": "0"}
+
+
+class TestResultFilter:
+    def test_words_map_to_results(self):
+        from analytics.scope import parse_result
+        assert [parse_result(w) for w in ("won", "Winning", "loss", "draw", "tie", "NR")] == \
+            ["won", "won", "lost", "drawn", "tied", "no result"]
+        with pytest.raises(ResolutionError):
+            parse_result("maybe")
+
+    def test_scope_and_the_ball_level_refusal(self):
+        s = build_scope(result="wins")
+        assert s.result == "won" and s.applied["result"] == "matches won" and s.per_innings_only
+        with pytest.raises(ResolutionError, match="match-result filter applies"):
+            s.match_clauses()

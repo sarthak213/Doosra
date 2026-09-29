@@ -409,3 +409,18 @@ def test_compare_breaks_players_down_by_phase(client):
     assert "economy" in bowl["columns"] and "error" not in bowl
     filtered = client.post("/api/compare", json={"players": ["S Sharma"], "filters": {"phase": "death"}}).json()
     assert "clear the Phase filter" in filtered["by_phase"]["error"]
+
+
+def test_match_result_filter_and_split_agree(client):
+    base = {"metrics": ["innings", "runs"], "players": ["S Sharma"]}
+    split = client.post("/api/query", json={**base, "split_by": "result"}).json()
+    by = {r[0]: r[1] for r in split["rows"]}                      # one player: first column is the result
+    assert set(by) <= {"won", "lost", "drawn", "tied", "no result"} and by
+    for result, innings in by.items():
+        f = client.post("/api/query", json={**base, "filters": {"result": result}}).json()
+        assert f["rows"][0][1] == innings and f["filters"]["result"]
+    # bowling and per-phase figures take it too; a bad value is a clear 400
+    assert client.post("/api/query", json={"role": "bowling", "metrics": ["wickets"], "filters": {"result": "lost", "phase": "death"}}).status_code == 200
+    bad = client.post("/api/query", json={"metrics": ["runs"], "filters": {"result": "maybe"}})
+    assert bad.status_code == 400
+    assert client.get("/api/players/S Sharma/profile", params={"result": "won"}).status_code == 200

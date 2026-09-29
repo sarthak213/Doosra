@@ -123,6 +123,8 @@ class Scope:
     position: tuple[int, int] | None = None
     entry_phase: str | None = None
     entry_wickets: tuple[int, int] | None = None
+    # The match result from the player's side: won, lost, drawn, tied, no result.
+    result: str | None = None
     applied: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
@@ -138,6 +140,15 @@ class Scope:
     @property
     def entry_filters(self) -> bool:
         return bool(self.entry_phase or self.entry_wickets)
+
+    @property
+    def per_innings_only(self) -> bool:
+        """Filters that exist only on per-innings/per-phase player records (batting role, match result)."""
+        return self.batting_role or bool(self.result)
+
+    def result_clauses(self, result_sql: str) -> list[str]:
+        """The match-result filter, on a per-innings or per-phase table (alias m)."""
+        return [f"({result_sql}) = {lit(self.result)}"] if self.result else []
 
     def batting_clauses(self, entry_phase_sql: str) -> list[str]:
         """The batting-role filters, on a per-innings batting table (alias m)."""
@@ -155,10 +166,13 @@ class Scope:
     def match_clauses(self, batting_innings: bool = False) -> list[str]:
         """Filters on the matches table (alias m). The batting-role filters exist only on per-innings
         batting records; a view built on anything else refuses them rather than ignoring them."""
-        if self.batting_role and not batting_innings:
-            raise ResolutionError("position", self.applied.get("position") or self.applied.get("entry", ""),
-                                  "Batting position and entry filters apply to player batting figures (Player Hub, "
-                                  "Compare, Query Builder, leaderboards), not to this view. Remove them here.")
+        if self.per_innings_only and not batting_innings:
+            which = ("Batting position, entry and match-result filters apply" if self.batting_role
+                     else "The match-result filter applies")
+            raise ResolutionError("result" if not self.batting_role else "position",
+                                  self.applied.get("result") or self.applied.get("position") or self.applied.get("entry", ""),
+                                  f"{which} to player figures (Player Hub, Compare, Query Builder, leaderboards), "
+                                  "not to this view. Remove them here.")
         c = []
         if self.events:
             c.append(f"m.event_name IN {lit_list(self.events)}")
@@ -249,6 +263,7 @@ def build_scope(
     position=None,
     entry_phase: str | None = None,
     entry_wickets=None,
+    result: str | None = None,
     default_gender: str | None = None,
 ) -> Scope:
     """Resolve human-readable filters. Raises ResolutionError (with
@@ -355,8 +370,27 @@ def build_scope(
     if entry_wickets not in (None, ""):
         s.entry_wickets = parse_range(entry_wickets, "entry_wickets", 0, 10)
         s.applied["entry_wickets"] = describe_range(s.entry_wickets, "wickets down at entry:")
+    if result not in (None, ""):
+        s.result = parse_result(result)
+        s.applied["result"] = f"matches {s.result}" if s.result in ("won", "lost", "drawn", "tied") else "no-result matches"
+        s.notes.append("Result is from the player's side: 'won' = matches their team won.")
 
     return s
+
+
+RESULT_WORDS = {
+    "won": "won", "win": "won", "wins": "won", "winning": "won", "victory": "won", "victories": "won",
+    "lost": "lost", "loss": "lost", "losses": "lost", "losing": "lost", "lose": "lost", "defeat": "lost", "defeats": "lost",
+    "drawn": "drawn", "draw": "drawn", "draws": "drawn", "tied": "tied", "tie": "tied", "ties": "tied",
+    "no result": "no result", "nr": "no result", "abandoned": "no result", "no-result": "no result",
+}
+
+
+def parse_result(value) -> str:
+    key = str(value).strip().lower()
+    if key in RESULT_WORDS:
+        return RESULT_WORDS[key]
+    raise ResolutionError("result", str(value), "result must be one of: won, lost, drawn, tied, no result.")
 
 
 # Batting orders in words -> positions (1 = opener).
@@ -396,7 +430,7 @@ def describe_range(r: tuple[int, int], prefix: str) -> str:
 
 
 FILTER_ARGS = ("competition", "format", "gender", "team", "opposition", "venue", "season",
-               "from_year", "to_year", "phase", "innings", "position", "entry_phase", "entry_wickets")
+               "from_year", "to_year", "phase", "innings", "position", "entry_phase", "entry_wickets", "result")
 
 
 # Names models and people reach for, mapped onto ours.
@@ -407,6 +441,7 @@ FILTER_ALIASES = {
     "start_year": "from_year", "end_year": "to_year", "until": "to_year",
     "batting_position": "position", "batting_order": "position", "order": "position",
     "entry_wkts": "entry_wickets", "wickets_down": "entry_wickets", "came_in": "entry_phase",
+    "match_result": "result", "outcome": "result",
 }
 
 

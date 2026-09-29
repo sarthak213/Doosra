@@ -88,6 +88,9 @@ const FIELDS = {
   phase: { label: "Phase", select: ["", "powerplay", "middle", "death"], names: { "": "all" } },
   innings: { label: "Innings", select: (filters) => inningsOptions(filters?.format),
     names: (filters) => inningsNames(filters?.format) },
+  // From the player's side: "won" = matches their team won. Batting and bowling.
+  result: { label: "Match result", select: ["", "won", "lost", "drawn", "tied", "no result"],
+    names: { "": "any", won: "team won", lost: "team lost" } },
   // How the batter came in -- batting only. Compare players in like-for-like roles (an opener with
   // openers, a finisher with finishers).
   position: { label: "Batting position", batting: true,
