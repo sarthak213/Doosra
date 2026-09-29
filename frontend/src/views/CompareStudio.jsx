@@ -1,10 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiSend } from "../api.js";
 import { useCopilotContext } from "../copilot/CopilotProvider.jsx";
-import { LineChartKit, PercentileBars } from "../components/kit/Charts.jsx";
+import { BarChartKit, LineChartKit, PercentileBars } from "../components/kit/Charts.jsx";
 import DataTable from "../components/kit/DataTable.jsx";
-import { FilterBar, MetricPicker, PlayerPicker, RoleToggle } from "../components/kit/Inputs.jsx";
+import { FilterBar, MetricPicker, PlayerPicker, RoleToggle, filtersFor } from "../components/kit/Inputs.jsx";
 import Panel, { ErrorNote, Loading, summarize } from "../components/kit/Panel.jsx";
 import { SERIES } from "../components/kit/theme.js";
 import { useFetch } from "../hooks/useFetch.js";
@@ -17,14 +17,51 @@ const METRICS = {
 const ARC = { batting: ["average", "strike_rate", "runs", "true_sr"], bowling: ["wickets", "average", "economy", "strike_rate"] };
 const DEFAULTS = { players: [], role: "batting", filters: {}, metrics: null, arc: "average" };
 
+// Each player in each phase: grouped bars for one metric (phase on the axis, a bar per player, in
+// the page's player colours) above the full table.
+const PHASE_CHART = { batting: ["strike_rate", "average", "runs", "dot_pct", "boundary_pct", "true_sr"],
+  bowling: ["economy", "wickets", "strike_rate", "average", "dot_pct", "true_economy"] };
+const PHASE_LABEL = { strike_rate: "Strike rate", average: "Average", runs: "Runs", dot_pct: "Dot %", boundary_pct: "Boundary %",
+  true_sr: "True strike rate", economy: "Economy", wickets: "Wickets", true_economy: "True economy" };
+
+function ByPhase({ table, role, players, colors }) {
+  const [metric, setMetric] = useState(PHASE_CHART[role][0]);
+  const m = PHASE_CHART[role].includes(metric) ? metric : PHASE_CHART[role][0];
+  if (table?.error) return <p className="empty-note">{table.error}</p>;
+  if (!table?.rows?.length) return <p className="empty-note">{table?.notes?.slice(-1)[0] || "No phase data for these filters."}</p>;
+  const cols = table.columns;
+  const multi = cols[1] === "player";
+  const iv = cols.indexOf(m);
+  const data = ["powerplay", "middle", "death"].map((phase) => {
+    const row = { phase };
+    table.rows.filter((r) => r[0] === phase).forEach((r) => { row[multi ? r[1] : players[0]] = r[iv]; });
+    return row;
+  }).filter((r) => Object.keys(r).length > 1);
+  const series = players.map((p, i) => ({ key: p, label: p, color: colors[i] }));
+  return (
+    <>
+      <div className="phase-chart-head">
+        <label className="filter-field"><span>Chart</span>
+          <select value={m} onChange={(e) => setMetric(e.target.value)}>
+            {PHASE_CHART[role].map((k) => <option key={k} value={k}>{PHASE_LABEL[k]}</option>)}
+          </select>
+        </label>
+      </div>
+      <BarChartKit data={data} x="phase" series={series} height={260} horizontal={false} />
+      <DataTable table={table} compact maxHeight={420} />
+    </>
+  );
+}
+
 export default function CompareStudio() {
   const navigate = useNavigate();
   const [st, set] = useViewState(DEFAULTS);
   const metrics = st.metrics || METRICS[st.role];
   const arcMetric = ARC[st.role].includes(st.arc) ? st.arc : ARC[st.role][0];
-  const key = JSON.stringify([st.players, st.role, st.filters, metrics, arcMetric]);
+  const filters = filtersFor(st.role, st.filters);
+  const key = JSON.stringify([st.players, st.role, filters, metrics, arcMetric]);
   const res = useFetch(st.players.length ? (s) => apiSend("/api/compare", {
-    players: st.players, role: st.role, metrics, filters: st.filters, arc_metric: arcMetric,
+    players: st.players, role: st.role, metrics, filters, arc_metric: arcMetric,
   }, "POST", s) : null, key);
 
   const resolved = useMemo(() => res.data?.table?.rows?.map((r) => r[0]) || [], [res.data]);
@@ -75,7 +112,7 @@ export default function CompareStudio() {
         <RoleToggle value={st.role} onChange={(r) => set({ role: r, metrics: null })} />
       </div>
       <div className="controls-row">
-        <FilterBar filters={st.filters} onChange={(f) => set({ filters: f })} />
+        <FilterBar filters={st.filters} role={st.role} onChange={(f) => set({ filters: f })} />
       </div>
       <div className="controls-row">
         <MetricPicker role={st.role} multiple value={metrics} onChange={(m) => set({ metrics: m })} label="Metrics" />
@@ -103,6 +140,10 @@ export default function CompareStudio() {
                 {Object.entries(res.data.table.highlights).map(([k, v]) => <li key={k}><span>{k.replace(/_/g, " ")}</span> {v}</li>)}
               </ul>
             )}
+          </Panel>
+          <Panel title="By phase" subtitle="Each player in the powerplay, middle overs and at the death, on the same filters."
+            explain={{ data: summarize(res.data.by_phase, 12), question: "How do these players compare phase by phase, and who is the specialist where?" }}>
+            <ByPhase table={res.data.by_phase} role={st.role} players={resolved} colors={SERIES} />
           </Panel>
           <div className="grid-2">
             <Panel title="Percentile vs peers" subtitle={res.data.percentiles?.notes?.slice(-1)[0]}

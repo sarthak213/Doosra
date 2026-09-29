@@ -68,15 +68,30 @@ class Recorder:
         self.answer = ""
         self.final: dict = {}
         self.saved = False
+        self.reasoning = ""          # streamed reasoning, kept as one step per model call
+
+    def _flush_reasoning(self) -> None:
+        if self.reasoning.strip():
+            self.events.append(slim({"type": "thought", "content": self.reasoning.strip(), "reasoning": True}))
+        self.reasoning = ""
 
     def see(self, event: dict) -> None:
-        if event.get("type") == "final_answer":
+        kind = event.get("type")
+        if kind == "draft":          # live text: the answer is saved from final_answer, reasoning as a step
+            if event.get("kind") == "reasoning":
+                self.reasoning += event.get("text", "")
+            return
+        if kind == "mode":
+            return
+        self._flush_reasoning()
+        if kind == "final_answer":
             self.answer = event.get("content") or ""
             self.final = {k: event.get(k) for k in ("chart_data", "table_data") if event.get(k)}
         else:
             self.events.append(slim(event))
 
     def save(self) -> None:
+        self._flush_reasoning()
         if self.saved or not (self.answer or self.events):
             return
         self.saved = True

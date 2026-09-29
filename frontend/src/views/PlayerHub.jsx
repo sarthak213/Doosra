@@ -4,14 +4,14 @@ import { apiGet, apiSend, playerPath } from "../api.js";
 import { useCopilotContext } from "../copilot/CopilotProvider.jsx";
 import { LineChartKit, Heatmap, PercentileBars } from "../components/kit/Charts.jsx";
 import DataTable from "../components/kit/DataTable.jsx";
-import { FilterBar, PlayerPicker, RoleToggle, useMetrics } from "../components/kit/Inputs.jsx";
+import { FilterBar, PlayerPicker, RoleToggle, filtersFor, useMetrics } from "../components/kit/Inputs.jsx";
 import Panel, { ErrorNote, Loading, summarize } from "../components/kit/Panel.jsx";
 import { formatValue } from "../components/kit/theme.js";
 import { useFetch } from "../hooks/useFetch.js";
 import { stateUrl, useViewState } from "../hooks/useViewState.js";
 
 const DEFAULTS = { role: "batting", filters: {}, window: 10, split: "format", formMetric: "average" };
-const SPLITS = ["format", "season", "competition", "opposition", "venue", "phase", "position", "entry_phase", "chase", "result", "dismissal"];
+const SPLITS = ["format", "season", "competition", "opposition", "venue", "phase", "position", "entry_phase", "entry_wickets", "chase", "result", "dismissal"];
 const SPLIT_METRICS = {
   batting: "innings,runs,average,strike_rate,true_sr,hundreds,fifties,boundary_pct",
   bowling: "innings,wickets,average,economy,strike_rate,true_economy,dot_pct",
@@ -61,20 +61,21 @@ export default function PlayerHub() {
   const [st, set] = useViewState(DEFAULTS);
   const metrics = useMetrics();
   const [watchlist, setWatchlist] = useState(null);
-  const fkey = JSON.stringify(st.filters);
   const role = st.role;
+  const filters = filtersFor(role, st.filters);   // bowling views don't send the batting-only filters
+  const fkey = JSON.stringify(filters);
 
-  const profile = useFetch(name ? (s) => apiGet(`${playerPath(name)}/profile`, st.filters, s) : null, `${name}|${fkey}`);
+  const profile = useFetch(name ? (s) => apiGet(`${playerPath(name)}/profile`, filters, s) : null, `${name}|${fkey}`);
   const hasRole = profile.data?.[role];
-  const form = useFetch(name && hasRole ? (s) => apiGet(`${playerPath(name)}/form`, { ...st.filters, role, window: st.window }, s) : null,
+  const form = useFetch(name && hasRole ? (s) => apiGet(`${playerPath(name)}/form`, { ...filters, role, window: st.window }, s) : null,
     `${name}|${fkey}|${role}|${st.window}|${!!hasRole}`);
   const splits = useFetch(name && hasRole ? (s) => apiGet(`${playerPath(name)}/splits`,
-    { ...st.filters, role, split_by: st.split, metrics: SPLIT_METRICS[role] }, s) : null, `${name}|${fkey}|${role}|${st.split}|${!!hasRole}`);
-  const pct = useFetch(name && hasRole ? (s) => apiGet(`${playerPath(name)}/percentiles`, { ...st.filters, role }, s) : null,
+    { ...filters, role, split_by: st.split, metrics: SPLIT_METRICS[role] }, s) : null, `${name}|${fkey}|${role}|${st.split}|${!!hasRole}`);
+  const pct = useFetch(name && hasRole ? (s) => apiGet(`${playerPath(name)}/percentiles`, { ...filters, role }, s) : null,
     `${name}|${fkey}|${role}|${!!hasRole}`);
-  const entry = useFetch(name && hasRole && role === "batting" ? (s) => apiGet(`${playerPath(name)}/entry-heatmap`, st.filters, s) : null,
+  const entry = useFetch(name && hasRole && role === "batting" ? (s) => apiGet(`${playerPath(name)}/entry-heatmap`, filters, s) : null,
     `${name}|${fkey}|${role}|${!!hasRole}`);
-  const similar = useFetch(name && hasRole ? (s) => apiGet(`${playerPath(name)}/similar`, { ...st.filters, role, limit: 8 }, s) : null,
+  const similar = useFetch(name && hasRole ? (s) => apiGet(`${playerPath(name)}/similar`, { ...filters, role, limit: 8 }, s) : null,
     `${name}|${fkey}|${role}|${!!hasRole}`);
   const wl = useFetch(() => apiGet("/api/watchlist"), "watchlist");
   const onList = (watchlist ?? wl.data?.players ?? []);
@@ -167,7 +168,7 @@ export default function PlayerHub() {
 
       <div className="controls-row">
         <RoleToggle value={role} onChange={(r) => set({ role: r, formMetric: r === "batting" ? "average" : "economy" })} />
-        <FilterBar filters={st.filters} onChange={(f) => set({ filters: f })} />
+        <FilterBar filters={st.filters} role={role} onChange={(f) => set({ filters: f })} />
       </div>
 
       {profile.loading && <Loading />}
@@ -233,7 +234,7 @@ export default function PlayerHub() {
         <Panel title="Splits" explain={{ data: summarize(splits.data), question: "What stands out in these splits?" }}
           actions={
             <select aria-label="Split by" value={st.split} onChange={(e) => set({ split: e.target.value })}>
-              {SPLITS.filter((s) => role === "batting" || !["position", "entry_phase", "dismissal"].includes(s)).map((s) => (
+              {SPLITS.filter((s) => role === "batting" || !["position", "entry_phase", "entry_wickets", "dismissal"].includes(s)).map((s) => (
                 <option key={s} value={s}>by {s.replace("_", " ")}</option>
               ))}
             </select>

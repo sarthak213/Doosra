@@ -626,6 +626,26 @@ select:focus,
 
 .chart-block {
   width: 100%;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* A chart fills the rest of its panel (see ChartArea in Charts.jsx). */
+.panel,
+.board-card,
+.chart-panel {
+  display: flex;
+  flex-direction: column;
+}
+.chart-area {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+}
+.chart-area-inner {
+  position: absolute;
+  inset: 0;
 }
 .chart-legend {
   display: flex;
@@ -1600,3 +1620,34 @@ option {
 .view-tools .primary-btn { border: 1px solid transparent; }
 a.primary-btn, a.ghost-btn { text-decoration: none; }
 .sb-head > span { display: inline-flex; gap: 2px; }
+
+.phase-chart-head { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+
+/* Bar lists (percentiles, FIBS reliability) fill their panel like the charts do: rows share the
+   spare height and each bar grows a little (capped, so a tall panel never gives slabs). */
+.pct-bars,
+.rel-bars {
+  flex: 1 1 auto;
+}
+.pct-row,
+.rel-row {
+  flex: 1 1 auto;
+}
+.pct-row {
+  align-items: stretch;
+}
+.pct-label {
+  align-self: center;
+}
+.pct-tracks {
+  justify-content: center;
+}
+.pct-track {
+  height: auto;
+  min-height: 20px;
+  max-height: 32px;
+  flex: 1 1 20px;
+}
+.pct-scale {
+  flex: none;
+}

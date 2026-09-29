@@ -22,6 +22,19 @@ function makeTurn(question, streaming = true) {
 // One stream event applied to a turn. Live streaming and reopening a saved
 // chat both go through this, so a restored answer looks exactly like the live one.
 export function applyEvent(t, event) {
+  // Live text: `draft` is the answer as it's written, `liveReasoning` the model's reasoning as it
+  // thinks. Any other event ends that stretch: reasoning becomes a step in the trace, and text
+  // written before a tool call was a preamble, not the answer.
+  if (event.type === "mode") return { ...t, thinking: !!event.thinking };
+  if (event.type === "draft") {
+    return event.kind === "reasoning"
+      ? { ...t, liveReasoning: (t.liveReasoning || "") + event.text }
+      : { ...t, draft: (t.draft || "") + event.text };
+  }
+  if (t.liveReasoning?.trim()) {
+    t = { ...t, steps: [...t.steps, { type: "thought", content: t.liveReasoning.trim(), reasoning: true }], liveReasoning: "" };
+  }
+  if (t.draft && event.type !== "table" && event.type !== "chart") t = { ...t, draft: "" };
   switch (event.type) {
     case "final_answer":
       return { ...t, finalAnswer: event.content, chartData: event.chart_data || null, tableData: event.table_data || null };

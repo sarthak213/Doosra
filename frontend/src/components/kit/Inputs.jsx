@@ -88,10 +88,28 @@ const FIELDS = {
   phase: { label: "Phase", select: ["", "powerplay", "middle", "death"], names: { "": "all" } },
   innings: { label: "Innings", select: (filters) => inningsOptions(filters?.format),
     names: (filters) => inningsNames(filters?.format) },
+  // How the batter came in -- batting only. Compare players in like-for-like roles (an opener with
+  // openers, a finisher with finishers).
+  position: { label: "Batting position", batting: true,
+    select: ["", "1-2", "1-3", "4-7", "5-7", "8-11", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"],
+    names: { "": "any", "1-2": "openers (1-2)", "1-3": "top order (1-3)", "4-7": "middle order (4-7)",
+      "5-7": "finishers (5-7)", "8-11": "lower order (8-11)" } },
+  entry_phase: { label: "Came in during", batting: true, select: ["", "powerplay", "middle", "death"], names: { "": "any" } },
+  entry_wickets: { label: "Wickets down at entry", batting: true, select: ["", "0", "1", "2", "1-2", "3-4", "3+", "5+"],
+    names: { "": "any" } },
 };
 
-// The shared filter bar. `show` limits which filters appear.
-export function FilterBar({ filters, onChange, show = Object.keys(FIELDS) }) {
+const BATTING_ONLY = Object.keys(FIELDS).filter((k) => FIELDS[k].batting);
+
+// The filters a view should send: bowling views drop the batting-only ones.
+export function filtersFor(role, filters) {
+  if (role !== "bowling" || !filters) return filters;
+  return Object.fromEntries(Object.entries(filters).filter(([k]) => !BATTING_ONLY.includes(k)));
+}
+
+// The shared filter bar. `show` limits which filters appear; with role="bowling" the batting-only
+// ones are hidden (and dropped from requests by filtersFor).
+export function FilterBar({ filters, onChange, show = Object.keys(FIELDS), role }) {
   const options = useOptions();
   const set = (key, v) => {
     const next = { ...filters };
@@ -102,9 +120,11 @@ export function FilterBar({ filters, onChange, show = Object.keys(FIELDS) }) {
     onChange(next);
   };
   const active = Object.keys(filters || {}).length;
+  const shown = role === "bowling" ? show.filter((k) => !BATTING_ONLY.includes(k)) : show;
+  const parked = role === "bowling" && BATTING_ONLY.some((k) => filters?.[k] != null);
   return (
     <div className="filter-bar" role="group" aria-label="Filters">
-      {show.map((key) => {
+      {shown.map((key) => {
         const f = FIELDS[key];
         const choices = typeof f.select === "function" ? f.select(filters) : f.select;
         const names = typeof f.names === "function" ? f.names(filters) : f.names;
@@ -128,6 +148,7 @@ export function FilterBar({ filters, onChange, show = Object.keys(FIELDS) }) {
       {active > 0 && (
         <button type="button" className="ghost-btn filter-clear" onClick={() => onChange({})}>Clear ({active})</button>
       )}
+      {parked && <span className="note-meta filter-parked">Batting position and entry filters are set but don't apply to bowling.</span>}
     </div>
   );
 }

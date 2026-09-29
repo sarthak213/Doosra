@@ -144,7 +144,7 @@ def _sse(question: str, history: list, request_id: str | None, context: dict | N
     async def produce():
         try:
             async for event in run_agent(question, history=history, request_id=request_id, context=context,
-                                       project=project):
+                                       project=project, deep=recorder is not None):
                 if recorder:
                     recorder.see(event)
                 queue.put_nowait(event)

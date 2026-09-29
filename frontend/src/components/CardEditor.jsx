@@ -119,7 +119,7 @@ export default function CardEditor({ card, onSave, onCancel }) {
               <MetricPicker role={st.role || "batting"} multiple value={st.metrics || []} label="Metrics" onChange={(m) => setState({ metrics: m })} />
             </div>
           )}
-          <FilterBar filters={st.filters || {}} onChange={(f) => setState({ filters: f })} />
+          <FilterBar filters={st.filters || {}} role={st.role} onChange={(f) => setState({ filters: f })} />
         </>
       )}
 

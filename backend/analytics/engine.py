@@ -29,7 +29,7 @@ from . import catalog, db, fibs, registry
 from .catalog import ResolutionError
 from .registry import BAT, BOWL
 from .results import franchise_case, highlights, num, overs, result, season_labels
-from .scope import Scope, build_scope, lit, lit_list
+from .scope import Scope, build_scope, lit, lit_list, normalize_filters
 
 MAX_LIMIT = 200
 
@@ -92,8 +92,21 @@ def _check_built():
         raise EngineError("The analytics tables haven't been built yet. Run: python -m analytics.build")
 
 
+def _table(role: str, scope: Scope, phase_mode: bool | None = None) -> str:
+    """The per-innings (or per-phase) table for a view, after checking the batting-role filters
+    can apply there: they describe how a batter came in, so they need batting records, and the
+    entry filters need whole innings (the per-phase tables don't record entry)."""
+    phase_mode = bool(scope.phase) if phase_mode is None else phase_mode
+    if scope.batting_role and role != BAT:
+        raise EngineError("Batting position and entry filters apply to batting figures only; remove them for bowling.")
+    if scope.entry_filters and phase_mode:
+        raise EngineError("Entry filters (entry phase, wickets down at entry) can't be combined with a phase filter "
+                          "or phase split: entry is recorded per innings. Use one or the other.")
+    return _TABLES[(role, phase_mode)]
+
+
 def _where(scope: Scope, players: list[str] | None = None, extra: list[str] | None = None) -> str:
-    c = scope.match_clauses()
+    c = scope.match_clauses(batting_innings=True) + scope.batting_clauses(_ENTRY_PHASE)
     if scope.team:
         c.append(f"m.team IN {lit_list(scope.team)}")
     if scope.opposition:
@@ -118,6 +131,21 @@ def _resolve_players(names, gender=None) -> tuple[list[str], list[str]]:
         if p.note:
             notes.append(p.note)
     return out, notes
+
+
+def _phase_safe(role: str, metric_ids: list[str], phase: str | None,
+                split: bool = False) -> tuple[list[str], str | None]:
+    """For views that ask for a fixed set of metrics (profile, percentiles, similar players): within a
+    phase, keep only the metrics that exist per phase and say which were left out. (A metric the user
+    asked for by name still fails loudly, in _metric_list.)"""
+    if not phase and not split:
+        return metric_ids, None
+    kept = [m for m in metric_ids if registry.get(role, m).phase_ok]
+    dropped = [registry.get(role, m).label for m in metric_ids if m not in kept]
+    where = f"Within the {phase} phase" if phase else "Split by phase"
+    note = (f"{where}, whole-innings figures aren't shown ({', '.join(dropped)}): "
+            "they only exist per innings.") if dropped else None
+    return kept, note
 
 
 def _metric_list(role: str, metrics, phase_mode: bool) -> list[registry.Metric]:
@@ -186,7 +214,13 @@ def query_stats(role: str = BAT, metrics=None, players=None, split_by: str | Non
     phase_mode = bool(scope.phase) or split_by == "phase"
     if phase_mode and split_by in ("entry_wickets", "entry_phase", "dismissal"):
         raise EngineError(f"split_by '{split_by}' can't be combined with a phase filter.")
-    ms = _metric_list(role, metrics or DEFAULT_METRICS[role], phase_mode)
+    if metrics:
+        ms = _metric_list(role, metrics, phase_mode)       # asked for by name: refused with a reason if it can't be
+    else:                                                  # the default set: leave out what a phase can't give
+        kept, left_out = _phase_safe(role, DEFAULT_METRICS[role], scope.phase, split=phase_mode)
+        ms = _metric_list(role, kept, False)
+        if left_out:
+            scope.notes.append(left_out)
     sort = registry.get(role, sort_by) if sort_by else (ms[0] if not names else None)
     if sort and phase_mode and not sort.phase_ok:
         raise EngineError(f"Can't sort by {sort.id} within a phase.")
@@ -201,7 +235,7 @@ SELECT COALESCE(CAST(({key}) AS VARCHAR), 'n/a') AS k, {'m.player,' if group_pla
        {metric_sql},
        SUM(m.balls) AS _balls, COUNT(*) AS _innings, mode(m.team) AS _team,
        MIN(m.date) AS first_date, MAX(m.date) AS last_date
-FROM {_TABLES[(role, phase_mode)]} m
+FROM {_table(role, scope, phase_mode)} m
 {_where(scope, names)}
 GROUP BY k{', m.player' if group_player else ''}
 """
@@ -291,14 +325,21 @@ def player_profile(player: str, **filters) -> dict:
            "span": info.describe()["span"]}
     if p.note:
         out["note"] = p.note
-    for role in (BAT, BOWL):
-        summary = query_stats(role=role, metrics=PROFILE_METRICS[role], players=[p.name], **filters)
+    clean = normalize_filters(filters)
+    phase = clean.get("phase")
+    # Position / entry filters describe a batter's role, so with them set there's no bowling side to show.
+    batting_role = any(clean.get(k) for k in ("position", "entry_phase", "entry_wickets"))
+    for role in ((BAT,) if batting_role else (BAT, BOWL)):
+        metrics, left_out = _phase_safe(role, PROFILE_METRICS[role], phase)
+        summary = query_stats(role=role, metrics=metrics, players=[p.name], **filters)
         if "error" in summary:
             return summary
+        if left_out:
+            summary.setdefault("notes", []).append(left_out)
         row = dict(zip(summary["columns"], summary["rows"][0])) if summary["rows"] else {}
         if not row.get("innings"):
             continue
-        by_format = query_stats(role=role, metrics=PROFILE_METRICS[role][:8], players=[p.name],
+        by_format = query_stats(role=role, metrics=metrics[:8], players=[p.name],
                                 split_by="format", **filters)
         out[role] = {"summary": summary, "by_format": by_format}
     out["primary_role"] = _primary_role(out)
@@ -333,7 +374,7 @@ def player_form(player: str, role: str = BAT, window: int = 10, **filters) -> di
     scope = build_scope(**filters)
     if p.note:
         scope.notes.insert(0, p.note)
-    table = _TABLES[(role, bool(scope.phase))]
+    table = _table(role, scope)
     w = f"(ORDER BY m.date, m.match_id, m.innings_num ROWS BETWEEN {window - 1} PRECEDING AND CURRENT ROW)"
     c = "(ORDER BY m.date, m.match_id, m.innings_num ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
     if role == BAT:
@@ -423,7 +464,7 @@ def career_arc(players, role: str = BAT, metric: str = "average", **filters) -> 
     sql = f"""
 SELECT m.player, ROW_NUMBER() OVER (PARTITION BY m.player ORDER BY m.date, m.match_id, m.innings_num) AS n,
        {exprs[metric]} AS v
-FROM {_TABLES[(role, bool(scope.phase))]} m {_where(scope, names)}
+FROM {_table(role, scope)} m {_where(scope, names)}
 WINDOW c AS (PARTITION BY m.player ORDER BY m.date, m.match_id, m.innings_num
              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
 ORDER BY n
@@ -453,13 +494,19 @@ def percentiles(players, role: str = BAT, metrics=None, min_balls: int | None = 
     default = {BAT: ["runs", "average", "strike_rate", "true_sr", "true_average", "boundary_pct", "dot_pct",
                      "match_factor"],
                BOWL: ["wickets", "average", "economy", "strike_rate", "true_economy", "true_wickets", "dot_pct"]}
-    ms = _metric_list(role, metrics or default[role], False)
     scope = build_scope(default_gender=None if g else catalog.get_catalog().players[names[0]].gender, **filters)
     scope.notes[:0] = notes
+    if metrics:
+        ms = _metric_list(role, metrics, bool(scope.phase))
+    else:
+        kept, left_out = _phase_safe(role, default[role], scope.phase)
+        ms = _metric_list(role, kept, False)
+        if left_out:
+            scope.notes.append(left_out)
     metric_sql = ",\n       ".join(f"{m.sql} AS {m.id}" for m in ms)
     rows = db.query(f"""
 SELECT m.player, {metric_sql}, SUM(m.balls) AS _balls
-FROM {_TABLES[(role, bool(scope.phase))]} m {_where(scope)}
+FROM {_table(role, scope)} m {_where(scope)}
 GROUP BY m.player
 """)
     max_balls = max((r["_balls"] or 0 for r in rows), default=0)
@@ -498,7 +545,7 @@ def scatter(role: str = BAT, x: str = "average", y: str = "strike_rate", min_bal
     _metric_list(role, [mx.id, my.id], phase_mode)
     rows = db.query(f"""
 SELECT m.player, mode(m.team) AS team, {mx.sql} AS x, {my.sql} AS y, SUM(m.balls) AS balls, COUNT(*) AS innings
-FROM {_TABLES[(role, phase_mode)]} m {_where(scope)}
+FROM {_table(role, scope, phase_mode)} m {_where(scope)}
 GROUP BY m.player
 """)
     max_balls = max((r["balls"] or 0 for r in rows), default=0)
@@ -545,7 +592,13 @@ def entry_heatmap(player: str, **filters) -> dict:
     _check_built()
     g = catalog.resolve_gender(filters.get("gender")) if filters.get("gender") else None
     p = catalog.resolve_player(player, gender=g)
-    scope = build_scope(**filters)
+    # The rows are already split by the phase the batter walked in, so a phase filter (which would
+    # need per-phase figures this per-innings view doesn't have) is set aside, and the user told.
+    phase = normalize_filters(filters).pop("phase", None)
+    scope = build_scope(**{k: v for k, v in filters.items() if k != "phase"})
+    if phase:
+        scope.notes.append(f"Entry points cover whole innings, split by the phase they came in; the {phase} "
+                           "phase filter isn't applied here.")
     if p.note:
         scope.notes.insert(0, p.note)
     rows = db.query(f"""
@@ -588,10 +641,14 @@ def similar_players(player: str, role: str = BAT, limit: int = 10, min_balls: in
     scope = build_scope(default_gender=catalog.get_catalog().players[p.name].gender, **filters)
     if p.note:
         scope.notes.insert(0, p.note)
-    feats = [registry.get(role, f) for f in _SIMILARITY_FEATURES[role]]
+    # Within a phase, compare on the features that exist per phase, from the per-phase table.
+    kept, left_out = _phase_safe(role, _SIMILARITY_FEATURES[role], scope.phase)
+    if left_out:
+        scope.notes.append(left_out)
+    feats = [registry.get(role, f) for f in kept]
     rows = db.query(f"""
 SELECT m.player, mode(m.team) AS team, SUM(m.balls) AS balls, {', '.join(f'{f.sql} AS {f.id}' for f in feats)}
-FROM {_TABLES[(role, False)]} m {_where(scope)}
+FROM {_table(role, scope)} m {_where(scope)}
 GROUP BY m.player
 """)
     me = next((r for r in rows if r["player"] == p.name), None)

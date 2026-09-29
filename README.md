@@ -179,6 +179,16 @@ second innings), limited overs have two (setting, chasing). Season also takes
 `latest` -- the most recent season of whatever else is filtered ("this IPL").
 Competition, team and venue inputs suggest as you type.
 
+Batting views add three filters on how the batter came in, for like-for-like
+comparisons (a finisher against finishers, not against openers): **batting
+position** (a number, a range such as `1-3` or `5+`, or openers / top order /
+middle order / finishers / lower order), **came in during** (powerplay, middle,
+death) and **wickets down at entry**. Stats can also be split by each of them.
+They apply to per-innings batting figures only: bowling views hide them, and a
+view built on ball-by-ball data refuses them with a reason rather than quietly
+ignoring them. Within a phase filter, figures that only exist for a whole innings
+(highest score, hundreds, match factor...) are left out, with a note saying so.
+
 ## Metrics
 
 `analytics/registry.py` declares every metric once: SQL over the per-innings
@@ -321,9 +331,21 @@ any OpenAI-compatible endpoint (LM Studio, Ollama, Groq — see `.env.example`).
 Events stream to the UI over SSE (`POST /api/chat/stream`, which also carries
 the current view as context; `GET /query/stream` for plain chat).
 
-With a local Qwen3-14B, expect roughly 30–120s per question with thinking on
-(`LLM_THINKING=on`, the default); turning it off is faster but it picks the
-wrong tool more often.
+Answers stream in as the model writes them, and the model's reasoning shows
+live while it thinks. With `LLM_THINKING=auto` (the default) a quick
+explanation from the copilot drawer or a page's Explain button answers
+directly, while a saved chat (the Ask tab, a project, a board explanation)
+reasons first and says so, since that can take a few minutes on a local model.
+`on` or `off` forces one mode. For per-request switching, leave reasoning
+enabled in LM Studio: while it is switched off there, requests can't turn it on.
+
+Local models are slowest at reading the prompt, so the prompt is laid out to
+be reused: the fixed rules and the tool definitions come first and never
+change; project notes, page context and the question come last. After the first
+question LM Studio reads only what's new. With Qwen3.5-9B (Q4_K_M) on a laptop's
+integrated GPU a question takes about a minute. The app waits up to 10 minutes
+for a local model (`LLM_TIMEOUT_SECONDS`) and never retries, since a retry
+means reading the whole prompt again.
 
 ## Using the tools from other apps (MCP)
 

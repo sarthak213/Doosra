@@ -37,11 +37,12 @@ def filter_params(
     team: str | None = None, opposition: str | None = None, venue: str | None = None,
     season: str | None = None, from_year: int | None = None, to_year: int | None = None,
     phase: str | None = None, innings: int | None = None,
+    position: str | None = None, entry_phase: str | None = None, entry_wickets: str | None = None,
 ) -> dict:
     return normalize_filters({
         "competition": competition, "format": format, "gender": gender, "team": team, "opposition": opposition,
         "venue": venue, "season": season, "from_year": from_year, "to_year": to_year, "phase": phase,
-        "innings": innings,
+        "innings": innings, "position": position, "entry_phase": entry_phase, "entry_wickets": entry_wickets,
     })
 
 
@@ -98,7 +99,17 @@ def form(name: str, role: Role = "batting", window: int = 10, filters: dict = De
 @router.get("/players/{name}/splits")
 def splits(name: str, split_by: str, role: Role = "batting", metrics: str | None = None,
            filters: dict = Depends(filter_params)):
-    return _ok(engine.query_stats(role=role, metrics=metrics, players=[name], split_by=split_by, **filters))
+    # The Player Hub's fixed column set: within a phase (or split by phase), leave out whole-innings
+    # columns and say so, rather than failing the panel.
+    left_out = None
+    if metrics and (filters.get("phase") or split_by == "phase"):
+        ids = [m.strip() for m in metrics.split(",") if m.strip()]
+        kept, left_out = engine._phase_safe(role, ids, filters.get("phase"), split=split_by == "phase")
+        metrics = ",".join(kept) or None
+    result = engine.query_stats(role=role, metrics=metrics, players=[name], split_by=split_by, **filters)
+    if left_out and isinstance(result, dict) and not result.get("error"):
+        result.setdefault("notes", []).append(left_out)
+    return _ok(result)
 
 
 @router.get("/players/{name}/entry-heatmap")
@@ -182,7 +193,41 @@ def compare(body: CompareBody):
         "percentiles": engine.percentiles(body.players, role=body.role, metrics=[
             m for m in (body.metrics or []) if m not in _NOT_RANKED] or None, **f),
         "arc": engine.career_arc(body.players, role=body.role, metric=body.arc_metric, **f),
+        "by_phase": by_phase([r[0] for r in table["rows"]] or body.players, body.role, f),   # resolved names
     }
+
+
+PHASE_ORDER = ("powerplay", "middle", "death")
+PHASE_METRICS = {
+    "batting": ["innings", "runs", "balls", "average", "strike_rate", "true_sr", "dot_pct", "boundary_pct"],
+    "bowling": ["innings", "wickets", "economy", "average", "strike_rate", "true_economy", "dot_pct", "boundary_pct"],
+}
+
+
+def by_phase(players: list[str], role: str, f: dict) -> dict:
+    """The players side by side in each phase: rows grouped powerplay, middle, death, and within a
+    phase in the order the players were picked, so the comparison is always next to each other."""
+    if f.get("phase"):
+        return {"error": f"The page is filtered to the {f['phase']} phase; clear the Phase filter to see all three."}
+    if f.get("entry_phase") or f.get("entry_wickets"):
+        return {"error": "Entry filters are per innings, so they can't be broken down by phase; clear them to see this."}
+    table = engine.query_stats(role=role, metrics=PHASE_METRICS[role], players=players, split_by="phase", **f)
+    if table.get("error"):
+        return table
+    cols = table["columns"]
+    ph = cols.index("phase")
+    pi = cols.index("player") if "player" in cols else None          # absent for a single player
+    order = {name: i for i, name in enumerate(players)}
+    table["rows"] = sorted(table["rows"], key=lambda r: (
+        PHASE_ORDER.index(r[ph]) if r[ph] in PHASE_ORDER else 9, order.get(r[pi], 99) if pi is not None else 0))
+    if pi is not None:
+        # phase first: the table reads as "in the powerplay, A vs B; in the middle..."
+        table["columns"] = [cols[ph], cols[pi]] + [c for i, c in enumerate(cols) if i not in (pi, ph)]
+        table["rows"] = [[r[ph], r[pi]] + [v for i, v in enumerate(r) if i not in (pi, ph)] for r in table["rows"]]
+    if not table["rows"]:
+        table.setdefault("notes", []).append(
+            "No phase data here: phases (powerplay, middle, death) exist in limited-overs cricket only.")
+    return table
 
 
 class QueryBody(BaseModel):

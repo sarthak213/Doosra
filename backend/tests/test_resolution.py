@@ -125,3 +125,29 @@ class TestScope:
     def test_literals_are_escaped(self):
         from analytics.scope import lit
         assert lit("Lord's") == "'Lord''s'"
+
+
+class TestBattingRoleFilters:
+    def test_positions_in_numbers_ranges_and_words(self):
+        from analytics.scope import parse_position
+        assert parse_position("4") == (4, 4) and parse_position("1-3") == (1, 3) and parse_position("5+") == (5, 11)
+        assert parse_position("openers") == (1, 2) and parse_position("Middle order") == (4, 7)
+        assert parse_position("3 to 5") == (3, 5)
+        for bad in ("0", "12", "7-3", "somewhere"):
+            with pytest.raises(ResolutionError):
+                parse_position(bad)
+
+    def test_scope_records_them(self):
+        s = build_scope(position="top order", entry_phase="death overs", entry_wickets="3+")
+        assert s.position == (1, 3) and s.entry_phase == "death" and s.entry_wickets == (3, 10)
+        assert s.applied["position"] == "batting at 1-3" and s.batting_role
+
+    def test_views_on_ball_data_refuse_them_instead_of_ignoring_them(self):
+        s = build_scope(position="4")
+        with pytest.raises(ResolutionError, match="batting figures"):
+            s.match_clauses()
+        assert s.match_clauses(batting_innings=True) == []        # the per-innings views apply them themselves
+
+    def test_aliases(self):
+        from analytics.scope import normalize_filters
+        assert normalize_filters({"batting_position": "1-3", "wickets_down": "0"}) == {"position": "1-3", "entry_wickets": "0"}
