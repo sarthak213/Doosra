@@ -93,7 +93,7 @@ export default function Setup() {
             {running && <button type="button" className="ghost-btn" onClick={() => apiSend("/api/desktop/setup/cancel")}>Stop</button>}
             {(job.state === "error" || job.state === "cancelled") && (
               <>
-                <button type="button" className="primary-btn" onClick={start}>Try again</button>
+                <button type="button" className="primary-btn" onClick={start}>{job.state === "cancelled" ? "Resume" : "Try again"}</button>
                 <button type="button" className="ghost-btn" onClick={() => setJob(null)}>Change choices</button>
               </>
             )}

@@ -126,6 +126,7 @@ class TestSetupJob:
                             lambda *a, **k: (_ for _ in ()).throw(downloads.Cancelled("stopped")))
         job = setup_job.start(model="qwen3.5-4b")
         assert wait_for(job) == "cancelled" and job.step("model").state == "waiting"
+        assert job.step("model").detail == "Stopped"
         assert not setup_job.ready()
 
     def test_lmstudios_copy_is_used_only_if_its_checksum_matches(self, desktop, monkeypatch, tmp_path):

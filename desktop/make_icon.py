@@ -51,6 +51,11 @@ def main() -> None:
     OUT.parent.mkdir(exist_ok=True)
     big.resize((256, 256), Image.LANCZOS).save(OUT, sizes=[(s, s) for s in SIZES])
     big.resize((512, 512), Image.LANCZOS).save(OUT.with_suffix(".png"))   # for the installer and README
+    for px in (55, 110):                                                   # the installer's header (no alpha: white)
+        tile = Image.new("RGB", (px, px), "white")
+        ball = big.resize((px, px), Image.LANCZOS)
+        tile.paste(ball, mask=ball)
+        tile.save(OUT.with_name(f"wizard-small-{px}.bmp"))
     print(f"wrote {OUT} ({', '.join(map(str, SIZES))} px)")
 
 

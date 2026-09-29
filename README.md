@@ -376,7 +376,7 @@ Any app that speaks the Model Context Protocol can use the same 21 tools. The
 server offers two transports:
 
 | Transport | Endpoint | Needs the API running? | Use when |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **stdio** | the client launches `python -m mcp_server` itself | No | Simplest; the client manages the process |
 | **HTTP** (streamable) | `http://localhost:8000/mcp` | Yes (`uvicorn main:app --port 8000`) | You already run the app, or several clients should share one server |
 

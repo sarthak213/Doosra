@@ -97,7 +97,7 @@ def _run(job: Job, engine: str, model: str | None, use_copy: bool, lm_model: str
     except downloads.Cancelled as e:
         job.state, job.error = "cancelled", str(e)
         if current:
-            current.state = "waiting"
+            current.state, current.detail = "waiting", "Stopped"
     except Exception as e:  # noqa: BLE001 - reported on the setup screen, which offers "Try again"
         job.state, job.error = "error", str(e)
         if current:

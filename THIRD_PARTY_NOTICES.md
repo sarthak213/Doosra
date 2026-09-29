@@ -5,31 +5,31 @@ Doosra's desktop app includes, or downloads on first run, the following. Each is
 ## Bundled with the app
 
 | Component | Licence | Source |
-|---|---|---|
-| llama.cpp (`llama-server`, ggml; Vulkan and CPU builds, release b11249) | MIT | https://github.com/ggml-org/llama.cpp |
-| LLVM OpenMP runtime (shipped inside the llama.cpp CPU build; its licence file is next to it) | Apache-2.0 WITH LLVM-exception | https://openmp.llvm.org |
-| Python 3 runtime | PSF License | https://www.python.org |
-| FastAPI, Starlette, Pydantic, Uvicorn | MIT / BSD-3-Clause | https://fastapi.tiangolo.com |
-| DuckDB | MIT | https://duckdb.org |
-| pandas, NumPy | BSD-3-Clause | https://pandas.pydata.org, https://numpy.org |
-| SQLAlchemy | MIT | https://www.sqlalchemy.org |
-| LangGraph | MIT | https://github.com/langchain-ai/langgraph |
-| Model Context Protocol Python SDK | MIT | https://github.com/modelcontextprotocol/python-sdk |
-| OpenAI Python client | Apache-2.0 | https://github.com/openai/openai-python |
-| pywebview | BSD-3-Clause | https://pywebview.flowrl.com |
-| pythonnet | MIT | https://github.com/pythonnet/pythonnet |
-| React, React Router | MIT | https://react.dev |
-| Recharts | MIT | https://recharts.org |
-| react-markdown, remark-gfm | MIT | https://github.com/remarkjs |
+| --- | --- | --- |
+| llama.cpp (`llama-server`, ggml; Vulkan and CPU builds, release b11249) | MIT | <https://github.com/ggml-org/llama.cpp> |
+| LLVM OpenMP runtime (shipped inside the llama.cpp CPU build; its licence file is next to it) | Apache-2.0 WITH LLVM-exception | <https://openmp.llvm.org> |
+| Python 3 runtime | PSF License | <https://www.python.org> |
+| FastAPI, Starlette, Pydantic, Uvicorn | MIT / BSD-3-Clause | <https://fastapi.tiangolo.com> |
+| DuckDB | MIT | <https://duckdb.org> |
+| pandas, NumPy | BSD-3-Clause | <https://pandas.pydata.org>, <https://numpy.org> |
+| SQLAlchemy | MIT | <https://www.sqlalchemy.org> |
+| LangGraph | MIT | <https://github.com/langchain-ai/langgraph> |
+| Model Context Protocol Python SDK | MIT | <https://github.com/modelcontextprotocol/python-sdk> |
+| OpenAI Python client | Apache-2.0 | <https://github.com/openai/openai-python> |
+| pywebview | BSD-3-Clause | <https://pywebview.flowrl.com> |
+| pythonnet | MIT | <https://github.com/pythonnet/pythonnet> |
+| React, React Router | MIT | <https://react.dev> |
+| Recharts | MIT | <https://recharts.org> |
+| react-markdown, remark-gfm | MIT | <https://github.com/remarkjs> |
 
 The app's window uses Microsoft Edge WebView2, which is part of Windows and is not redistributed by Doosra.
 
 ## Downloaded on first run
 
 | Component | Licence | Source |
-|---|---|---|
-| Qwen3.5 9B / 4B (GGUF, Q4_K_M) | Apache-2.0 | https://huggingface.co/lmstudio-community (weights by the Qwen team, Alibaba Cloud) |
-| Cricket data | Open Data Commons Attribution License (ODC-By 1.0) | Ball-by-ball data from Cricsheet, https://cricsheet.org |
+| --- | --- | --- |
+| Qwen3.5 9B / 4B (GGUF, Q4_K_M) | Apache-2.0 | <https://huggingface.co/lmstudio-community> (weights by the Qwen team, Alibaba Cloud) |
+| Cricket data | Open Data Commons Attribution License (ODC-By 1.0) | Ball-by-ball data from Cricsheet, <https://cricsheet.org> |
 
 The MIT licence text of llama.cpp:
 

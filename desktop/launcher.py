@@ -97,7 +97,8 @@ def already_running() -> bool:
         if k32.WaitForSingleObject(_mutex, 250) in (0, 0x80):   # released or abandoned: the other copy is gone
             return False
         if hwnd := user32.FindWindowW(None, TITLE):
-            user32.ShowWindow(hwnd, 9)         # SW_RESTORE
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)     # SW_RESTORE, only if minimized (it would un-maximize it)
             user32.SetForegroundWindow(hwnd)
             return True
     return False
