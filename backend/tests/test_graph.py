@@ -51,6 +51,11 @@ def run(question="q", context=None):
     return asyncio.run(go())
 
 
+def prompt_text(sent_entry):
+    """Everything the model was sent (the fixed system message plus this turn's background and question)."""
+    return "\n".join(m.get("content") or "" for m in sent_entry["messages"])
+
+
 def of_type(events, t):
     return [e for e in events if e["type"] == t]
 
@@ -196,7 +201,7 @@ class TestLoop:
     def test_view_context_reaches_the_model(self, scripted):
         sent = scripted(_reply(content="It shows Sharma on top."))
         run(context={"view": "query", "visible": {"rows": [["S Sharma", 15]]}})
-        assert "S Sharma" in sent[0]["messages"][0]["content"]
+        assert "S Sharma" in prompt_text(sent[0])
 
 
 class TestCleanArgs:
@@ -242,7 +247,7 @@ class TestProjectContext:
     def test_brief_and_notes_reach_the_system_prompt_with_the_grounding_rule(self, scripted):
         sent = scripted(_reply(calls=[_call("leaderboard", metric="runs"), _call("final_answer", answer="x")]))
         run_in_project(self.PROJECT)
-        system = sent[0]["messages"][0]["content"]
+        system = prompt_text(sent[0])
         assert "Scouting death bowlers for 2027." in system and "at most 4 crore" in system
         assert "every number still comes from tool results" in system
         assert "read_project_note" in {t["function"]["name"] for t in sent[0]["tools"]}
@@ -250,7 +255,7 @@ class TestProjectContext:
     def test_no_project_means_no_block_and_no_note_tool(self, scripted):
         sent = scripted(_reply(calls=[_call("leaderboard", metric="runs"), _call("final_answer", answer="x")]))
         run_in_project(None)
-        assert "working in the project" not in sent[0]["messages"][0]["content"]
+        assert "working in the project" not in prompt_text(sent[0])
         assert "read_project_note" not in {t["function"]["name"] for t in sent[0]["tools"]}
 
     def test_notes_over_budget_are_listed_and_readable_on_demand(self, scripted):
@@ -261,7 +266,7 @@ class TestProjectContext:
             _reply(calls=[_call("leaderboard", metric="runs"), _call("final_answer", answer="done")]),
         )
         run_in_project(big)
-        system = sent[0]["messages"][0]["content"]
+        system = prompt_text(sent[0])
         assert "tiny" in system and "zzzz" not in system and "Huge dossier" in system
         assert tool_messages(sent[1])[0]["title"] == "Huge dossier"
 
@@ -297,3 +302,132 @@ def test_a_context_overflow_says_how_to_fix_it():
     msg = graph._llm_error(RuntimeError("Error code: 400 - request (9964 tokens) exceeds the available context size (8704 tokens)"))
     assert "Context Length" in msg and "16384" in msg and "9964" in msg
     assert graph._llm_error(RuntimeError("timeout")) == "LLM request failed: timeout"
+
+
+def test_local_engine_failures_and_timeouts_are_explained():
+    crash = graph._llm_error(RuntimeError('Error code: 400 - {"code":500,"message":"failed to decode, ret = 1"}'))
+    assert "ran out of memory" in crash and "reload the model" in crash
+    slow = graph._llm_error(RuntimeError("Request timed out."))
+    assert "GPU offload" in slow and "LLM_TIMEOUT_SECONDS" in slow
+
+
+class TestPromptCaching:
+    """A local server reuses the prompt prefix it has already read, so everything before this turn's
+    message must be identical across questions, whatever the project, page or board."""
+
+    def _first_call(self, scripted, **kw):
+        sent = scripted(_reply(calls=[_call("leaderboard", metric="runs"), _call("final_answer", answer="x")]))
+        first = len(sent)            # the fixture keeps one list across installs
+
+        async def go():
+            return [e async for e in graph.run_agent("q", **kw)]
+        asyncio.run(go())
+        return sent[first]
+
+    def test_system_message_and_tools_do_not_depend_on_project_or_page(self, scripted):
+        plain = self._first_call(scripted)
+        busy = self._first_call(scripted, context={"view": "matrix", "x": "average"},
+                                project={"name": "P", "instructions": "brief", "notes": [{"title": "t", "body": "b"}]})
+        assert plain["messages"][0] == busy["messages"][0]
+        names = [t["function"]["name"] for t in plain["tools"]]
+        assert [t["function"]["name"] for t in busy["tools"]][: len(names)] == names   # the notes tool only adds at the end
+        last = busy["messages"][-1]["content"]
+        assert "brief" in last and '"view": "matrix"' in last and last.endswith("q")
+
+    def test_a_plain_question_is_sent_as_is(self, scripted):
+        assert self._first_call(scripted)["messages"][-1]["content"] == "q"
+
+
+def test_a_tool_argument_put_inside_filters_is_lifted_out():
+    # Seen with Qwen3.5-9B: min_balls given as a filter made the leaderboard fail, and the model
+    # fell back to hand-written SQL with the wrong definition of a ball.
+    schema = {"properties": {"metric": {}, "min_balls": {}, "limit": {}, "filters": {}}}
+    out = graph._clean_args("leaderboard", {"metric": "strike_rate", "filters": {"format": "T20I", "team": "England",
+                                                                                  "min_balls": 500}}, schema)
+    assert out == {"metric": "strike_rate", "min_balls": 500, "filters": {"format": "T20I", "team": "England"}}
+    # an explicit top-level value wins over one inside filters
+    out = graph._clean_args("leaderboard", {"metric": "runs", "limit": 5, "filters": {"limit": 50}}, schema)
+    assert out == {"metric": "runs", "limit": 5}
+
+
+class TestStreaming:
+    def test_partial_answer_reads_the_answer_as_it_arrives(self):
+        text = 'Bumrah: **7.34** "econ"\nnext é line'
+        full = json.dumps({"answer": text})                                  # escapes the quotes, newline and accent
+        seen = [graph.partial_answer(full[:i]) for i in range(len(full) + 1)]
+        assert seen[-1] == text
+        assert all(b.startswith(a) for a, b in zip(seen, seen[1:]))          # only ever grows
+        assert graph.partial_answer('{"answer": "a' + "\\") == "a"           # stops before a half escape
+        assert graph.partial_answer('{"other": 1}') == ""
+
+    def test_think_tags_split_even_across_chunks(self):
+        s = graph._ThinkSplitter()
+        out = []
+        for piece in ["<thi", "nk>weigh the", " options</th", "ink>Answer ", "here"]:
+            out += s.feed(piece)
+        joined = {}
+        for kind, text in out:
+            joined[kind] = joined.get(kind, "") + text
+        assert joined == {"reasoning": "weigh the options", "answer": "Answer here"}
+
+    def test_complete_streams_drafts_and_rebuilds_the_response(self, monkeypatch):
+        def chunk(content=None, reasoning=None, tool=None):
+            extra = {"reasoning_content": reasoning} if reasoning else {}
+            tcs = [SimpleNamespace(index=0, id=tool.get("id"), function=SimpleNamespace(
+                name=tool.get("name"), arguments=tool.get("args")))] if tool else None
+            delta = SimpleNamespace(content=content, tool_calls=tcs, model_extra=extra)
+            return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+
+        chunks = [chunk(reasoning="Let me think. "), chunk(tool={"id": "c1", "name": "final_answer", "args": '{"answer": "**Bum'}),
+                  chunk(tool={"args": 'rah** leads"}'})]
+        sent = {}
+
+        class Stream:
+            def __init__(self):
+                self.items = iter(chunks)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self.items)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        async def create(**kw):
+            sent.update(kw)
+            return Stream()
+
+        events = []
+        monkeypatch.setattr(graph.client.chat.completions, "create", create)
+        monkeypatch.setattr(graph, "_writer", lambda: events.append)
+        monkeypatch.setattr(graph, "LOCAL", True)
+        token = graph._TURN_THINKING.set(False)
+        try:
+            resp = asyncio.run(graph._complete([{"role": "user", "content": "q"}], [{"type": "function"}]))
+        finally:
+            graph._TURN_THINKING.reset(token)
+        call = resp.choices[0].message.tool_calls[0]
+        assert call.function.name == "final_answer" and json.loads(call.function.arguments) == {"answer": "**Bumrah** leads"}
+        assert sent["stream"] is True and sent["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"}
+        assert [(e["kind"], e["text"]) for e in events] == [("reasoning", "Let me think. "), ("answer", "**Bum"), ("answer", "rah** leads")]
+
+
+class TestReasoningMode:
+    def test_auto_reasons_in_saved_chats_only(self, monkeypatch):
+        monkeypatch.setattr(graph, "THINKING_MODE", "auto")
+        assert graph.thinking_for(deep=True) is True and graph.thinking_for(deep=False) is False
+        monkeypatch.setattr(graph, "THINKING_MODE", "off")
+        assert graph.thinking_for(deep=True) is False
+        monkeypatch.setattr(graph, "THINKING_MODE", "on")
+        assert graph.thinking_for(deep=False) is True
+
+    def test_the_turn_announces_its_mode_first(self, scripted, monkeypatch):
+        monkeypatch.setattr(graph, "THINKING_MODE", "auto")
+        scripted(_reply(calls=[_call("leaderboard", metric="runs"), _call("final_answer", answer="x")]))
+
+        async def go():
+            return [e async for e in graph.run_agent("q", deep=True)]
+        events = asyncio.run(go())
+        assert events[0] == {"type": "mode", "thinking": True}

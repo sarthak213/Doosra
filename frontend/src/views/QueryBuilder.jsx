@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { apiGet, apiSend } from "../api.js";
 import { useCopilotContext } from "../copilot/CopilotProvider.jsx";
 import DataTable from "../components/kit/DataTable.jsx";
-import { FilterBar, MetricPicker, RoleToggle, useMetrics } from "../components/kit/Inputs.jsx";
+import { FilterBar, MetricPicker, RoleToggle, useMetrics, filtersFor } from "../components/kit/Inputs.jsx";
 import Panel, { ErrorNote, Loading, summarize } from "../components/kit/Panel.jsx";
 import { useFetch } from "../hooks/useFetch.js";
 import { stateUrl, useViewState } from "../hooks/useViewState.js";
@@ -45,7 +45,7 @@ export default function QueryBuilder() {
   const [savedTick, setSavedTick] = useState(0);
   const sortBy = st.metrics.includes(st.sort_by) ? st.sort_by : st.metrics[0];
   const body = { role: st.role, metrics: st.metrics, sort_by: sortBy, ascending: st.ascending,
-    split_by: st.split_by || null, min_balls: st.min_balls, limit: st.limit, filters: st.filters };
+    split_by: st.split_by || null, min_balls: st.min_balls, limit: st.limit, filters: filtersFor(st.role, st.filters) };
   // Wait for the metric registry so incoming state is sanitized before querying.
   const res = useFetch(allMetrics.length ? (s) => apiSend("/api/query", body, "POST", s) : null,
     `${allMetrics.length > 0}|${JSON.stringify(body)}`);
@@ -122,7 +122,7 @@ export default function QueryBuilder() {
         </label>
       </div>
       <div className="controls-row">
-        <FilterBar filters={st.filters} onChange={(f) => set({ filters: f })} />
+        <FilterBar filters={st.filters} role={st.role} onChange={(f) => set({ filters: f })} />
       </div>
 
       <Panel explain={{ data: summarize(res.data, 20), question: "What does this table tell us? Point out anything surprising." }}

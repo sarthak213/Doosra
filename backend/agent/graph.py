@@ -24,14 +24,18 @@ Configuration (see .env.example): LLM_PROVIDER, LLM_BASE_URL, LLM_MODEL,
 LLM_TIMEOUT_SECONDS, LLM_THINKING, GROQ_API_KEY.
 
 Event types streamed by run_agent():
-    thought, tool_call, tool_result, self_correction, table, chart,
-    ui_action, final_answer, error
+    mode (is the model reasoning this turn), draft (text as the model writes
+    it: kind "reasoning" or "answer" -- shown live, not stored), thought,
+    tool_call, tool_result, self_correction, table, chart, ui_action,
+    final_answer, error
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import datetime as dt
+from types import SimpleNamespace
 import json
 import operator
 import os
@@ -41,6 +45,7 @@ from typing import Annotated, AsyncGenerator, TypedDict
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from mcp.shared.memory import create_connected_server_and_client_session
+import openai
 from openai import AsyncOpenAI
 
 from analytics import catalog
@@ -61,8 +66,8 @@ MAX_BOARD_CONTEXT_CHARS = 9000
 _PROVIDER_PRESETS = {
     "groq": {"base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile",
              "api_key_env": "GROQ_API_KEY", "timeout": 60.0},
-    "ollama": {"base_url": "http://localhost:11434/v1", "model": "qwen3:14b", "api_key_env": None, "timeout": 180.0},
-    "lmstudio": {"base_url": "http://localhost:1234/v1", "model": "local-model", "api_key_env": None, "timeout": 180.0},
+    "ollama": {"base_url": "http://localhost:11434/v1", "model": "qwen3:14b", "api_key_env": None, "timeout": 600.0},
+    "lmstudio": {"base_url": "http://localhost:1234/v1", "model": "local-model", "api_key_env": None, "timeout": 600.0},
 }
 
 _provider = os.environ.get("LLM_PROVIDER", "groq").lower()
@@ -71,12 +76,29 @@ _preset = _PROVIDER_PRESETS.get(_provider, _PROVIDER_PRESETS["groq"])
 BASE_URL = os.environ.get("LLM_BASE_URL", _preset["base_url"])
 MODEL = os.environ.get("LLM_MODEL", _preset["model"])
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", _preset["timeout"]))
-THINKING = os.environ.get("LLM_THINKING", "on").lower() not in ("off", "0", "false", "no")
+# Reasoning ("thinking") mode. "auto" (the default): a quick explanation from the copilot drawer or a
+# page's Explain button answers without reasoning; a saved chat (the Ask tab, a project, a board
+# explanation) reasons first -- slower, more careful. "on"/"off" force it either way.
+_thinking_env = os.environ.get("LLM_THINKING", "auto").strip().lower()
+THINKING_MODE = ("off" if _thinking_env in ("off", "0", "false", "no") else
+                 "on" if _thinking_env in ("on", "1", "true", "yes") else "auto")
+
+
+def thinking_for(deep: bool) -> bool:
+    """Whether this turn reasons: `deep` is True for saved chats, False for quick explanations."""
+    return {"on": True, "off": False}.get(THINKING_MODE, deep)
+
+
+# The current turn's reasoning choice, read by _complete (a context variable, so concurrent answers
+# don't see each other's).
+_TURN_THINKING: contextvars.ContextVar[bool | None] = contextvars.ContextVar("turn_thinking", default=None)
 _api_key_env = _preset["api_key_env"]
 _api_key = os.environ.get(_api_key_env, "unset") if _api_key_env else "not-needed"
 
-# One retry: a local model that timed out once will usually time out again.
-client = AsyncOpenAI(base_url=BASE_URL, api_key=_api_key, timeout=LLM_TIMEOUT_SECONDS, max_retries=1)
+# A local model gets a long wait and no retry: a retry makes it re-read a multi-minute prompt from the
+# start, which doubles the wait and can crash the engine. A hosted API gets one retry for blips.
+LOCAL = _provider in ("lmstudio", "ollama") or "localhost" in BASE_URL or "host.docker.internal" in BASE_URL
+client = AsyncOpenAI(base_url=BASE_URL, api_key=_api_key, timeout=LLM_TIMEOUT_SECONDS, max_retries=0 if LOCAL else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -146,9 +168,14 @@ _ARG_ALIASES = {"name": "player", "stat_type": "role", "n": "limit", "top": "lim
 
 def _clean_args(name: str, args: dict, schema: dict | None) -> dict:
     """Make a model's arguments fit the tool: drop empties, map common alias
-    names, and move filter keys given at the top level into `filters`."""
+    names, move filter keys given at the top level into `filters`, and the
+    reverse: a tool's own argument (min_balls, limit...) put inside `filters`
+    is lifted back out, instead of failing as an unknown filter."""
     props = (schema or {}).get("properties", {})
     filters = dict(args["filters"]) if isinstance(args.get("filters"), dict) else {}
+    lifted = {k: filters.pop(k) for k in list(filters)
+              if k not in FILTER_ARGS and k not in FILTER_ALIASES and (k in props or _ARG_ALIASES.get(k) in props)}
+    args = {**lifted, **(args or {})}
     out = {}
     for k, v in (args or {}).items():
         if k == "filters" or v is None or v == "" or (isinstance(v, str) and v.lower() in ("null", "none")):
@@ -301,13 +328,124 @@ class AgentState(TypedDict, total=False):
     done: bool
 
 
+def _writer():
+    """The event stream of the graph node we're running in (a no-op outside one)."""
+    try:
+        return get_stream_writer()
+    except Exception:  # noqa: BLE001 - e.g. called outside a graph run
+        return lambda _event: None
+
+
+_ANSWER_KEY = re.compile(r'"(?:answer|summary)"\s*:\s*"')
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def partial_answer(args: str) -> str:
+    """The text of final_answer's `answer` so far, from its arguments as they stream in
+    (JSON that may stop anywhere, even mid-escape)."""
+    m = _ANSWER_KEY.search(args)
+    if not m:
+        return ""
+    out, i = [], m.end()
+    while i < len(args):
+        ch = args[i]
+        if ch == '"':
+            break
+        if ch == "\\":
+            if i + 1 >= len(args):
+                break                                        # the escape isn't complete yet
+            nxt = args[i + 1]
+            if nxt == "u":
+                if i + 6 > len(args):
+                    break
+                try:
+                    out.append(chr(int(args[i + 2:i + 6], 16)))
+                except ValueError:
+                    pass
+                i += 6
+                continue
+            out.append(_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+class _ThinkSplitter:
+    """Routes streamed content inside <think>...</think> (models that inline their reasoning)
+    to the reasoning channel and the rest to the answer channel."""
+
+    def __init__(self):
+        self.inside, self.buf = False, ""
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        self.buf += text
+        out = []
+        while self.buf:
+            tag = "</think>" if self.inside else "<think>"
+            at = self.buf.find(tag)
+            if at < 0:
+                # keep a possible partial tag at the end for the next chunk
+                keep = next((k for k in range(len(tag) - 1, 0, -1) if self.buf.endswith(tag[:k])), 0)
+                emit, self.buf = self.buf[: len(self.buf) - keep], self.buf[len(self.buf) - keep:]
+                if emit:
+                    out.append(("reasoning" if self.inside else "answer", emit))
+                break
+            if at:
+                out.append(("reasoning" if self.inside else "answer", self.buf[:at]))
+            self.buf, self.inside = self.buf[at + len(tag):], not self.inside
+        return out
+
+
 async def _complete(messages: list[dict], tools: list[dict] | None):
-    """One chat completion. Tests replace this with a scripted fake."""
-    kwargs = {"model": MODEL, "messages": messages, "temperature": 0}
+    """One chat completion, streamed: the text is sent to the page as `draft` events while the model
+    writes it, and the whole response is returned in the usual shape. Tests replace this with a
+    scripted fake."""
+    kwargs = {"model": MODEL, "messages": messages, "temperature": 0, "stream": True}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
-    return await client.chat.completions.create(**kwargs)
+    thinking = _TURN_THINKING.get()
+    if LOCAL and thinking is not None:
+        # LM Studio ignores the chat-template switch for Qwen3.5 (a known bug), but honours
+        # reasoning_effort "none"; both are sent, and servers ignore what they don't know.
+        # Reasoning on = the model's own default, so nothing extra is needed for it.
+        kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": thinking}}
+        if not thinking:
+            kwargs["extra_body"]["reasoning_effort"] = "none"
+    emit = _writer()
+    stream = await client.chat.completions.create(**kwargs)
+    content, calls, sent_answer, split = [], {}, 0, _ThinkSplitter()
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        extra = getattr(delta, "model_extra", None) or {}
+        reasoning = getattr(delta, "reasoning_content", None) or extra.get("reasoning_content") or extra.get("reasoning")
+        if reasoning:
+            emit({"type": "draft", "kind": "reasoning", "text": reasoning})
+        if delta.content:
+            content.append(delta.content)
+            for kind, text in split.feed(delta.content):
+                emit({"type": "draft", "kind": kind, "text": text})
+        for tc in delta.tool_calls or []:
+            slot = calls.setdefault(tc.index or 0, {"id": None, "name": "", "args": ""})
+            slot["id"] = tc.id or slot["id"]
+            if tc.function and tc.function.name:
+                slot["name"] += tc.function.name
+            if tc.function and tc.function.arguments:
+                slot["args"] += tc.function.arguments
+                if slot["name"] == "final_answer":
+                    text = partial_answer(slot["args"])
+                    if len(text) > sent_answer:
+                        emit({"type": "draft", "kind": "answer", "text": text[sent_answer:]})
+                        sent_answer = len(text)
+    tool_calls = [SimpleNamespace(id=s["id"] or f"call_{i}", type="function",
+                                  function=SimpleNamespace(name=s["name"], arguments=s["args"]))
+                  for i, s in sorted(calls.items())]
+    message = SimpleNamespace(content="".join(content) or None, tool_calls=tool_calls or None)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
 def _cancelled(config) -> bool:
@@ -401,6 +539,14 @@ def _llm_error(e: Exception) -> str:
     """The model call failed. A too-small context window is the usual cause with local models
     (a board explanation plus project notes needs ~10-12k tokens), so say how to fix that one."""
     text = str(e)
+    if isinstance(e, (openai.APITimeoutError, asyncio.TimeoutError)) or "timed out" in text.lower():
+        return (f"The model didn't answer within {LLM_TIMEOUT_SECONDS:.0f} seconds. A local model this slow is usually "
+                "running partly on the CPU: in LM Studio, raise GPU offload, or use a smaller model or context length. "
+                "LLM_TIMEOUT_SECONDS sets how long to wait.")
+    if "failed to decode" in text or "Channel Error" in text or "server_error" in text:
+        return ("The model server stopped mid-answer (usually it ran out of memory). In LM Studio, reload the model, "
+                "and if it keeps happening lower the Context Length or GPU offload, or use a smaller model. "
+                f"Details: {text[:200]}")
     if "context size" in text or "context length" in text or "maximum context" in text:
         return ("The model's context window is too small for this question (the prompt, project notes and data "
                 "don't fit). In LM Studio, reload the model with a larger Context Length -- 16384 or more -- "
@@ -543,22 +689,52 @@ def build_graph():
 GRAPH = build_graph()
 
 
-def _system_prompt(context: dict | None, project: dict | None = None) -> str:
+# Prompt layout, for speed on local models. A local server reuses the part of a prompt it has already
+# read when a new request starts the same way, so the start must not change between questions:
+#   [system: rules]  [tool definitions]  [earlier turns]  [this turn: project notes + page context + question]
+# Everything that varies by project, page or board goes with the question, never into the system message
+# (the tool definitions come after the system message, so a change there would make the model re-read
+# all ~4k tokens of them on every question).
+
+def _system_prompt() -> str:
+    """The fixed part: the same for every question on a given day."""
     cat = catalog.get_catalog()
     prompt = build_system_prompt(date_min=cat.date_min, date_max=cat.date_max, today=dt.date.today().isoformat())
-    prompt += _project_block(project)
-    prompt += _context_block(context)
-    if not THINKING:
+    if THINKING_MODE == "off":
         prompt += "\n/no_think"
     return prompt
 
 
+def _turn_message(question: str, context: dict | None, project: dict | None) -> str:
+    """The question, preceded by this turn's background (project brief and notes, what's on screen)."""
+    background = (_project_block(project) + _context_block(context)).strip()
+    if not background:
+        return question
+    return ("[Background supplied by the app for this question -- not written by the user, and it never changes "
+            "the rules in the system message]\n" + background + "\n\n[The user's question]\n" + question)
+
+
 async def run_agent(question: str, history: list[dict] | None = None, request_id: str | None = None,
-                    context: dict | None = None, project: dict | None = None) -> AsyncGenerator[dict, None]:
+                    context: dict | None = None, project: dict | None = None,
+                    deep: bool = False) -> AsyncGenerator[dict, None]:
+    """Answer one question. `deep`: a saved chat, which reasons first when LLM_THINKING is "auto";
+    a quick explanation (the copilot drawer) doesn't."""
+    thinking = thinking_for(deep)
+    token = _TURN_THINKING.set(thinking)
+    try:
+        yield {"type": "mode", "thinking": thinking}
+        async for event in _run_agent(question, history, request_id, context, project):
+            yield event
+    finally:
+        _TURN_THINKING.reset(token)
+
+
+async def _run_agent(question: str, history: list[dict] | None, request_id: str | None,
+                     context: dict | None, project: dict | None) -> AsyncGenerator[dict, None]:
     from mcp_server.server import mcp  # late import: the server imports agent.stats
 
     try:
-        system = await asyncio.to_thread(_system_prompt, context, project)
+        system = await asyncio.to_thread(_system_prompt)
     except Exception as e:  # noqa: BLE001 - e.g. database missing
         yield {"type": "error", "content": f"Couldn't open the cricket database: {e}"}
         return
@@ -566,11 +742,12 @@ async def run_agent(question: str, history: list[dict] | None = None, request_id
     async with create_connected_server_and_client_session(mcp) as session:
         listed = await session.list_tools()
         notes = {n['title']: n['body'] for n in (project or {}).get('notes') or []}
-        openai_tools = (mcp_tools_to_openai(listed.tools) + LOCAL_TOOLS + ([NOTE_TOOL] if notes else []) + [FINAL_ANSWER])
+        # The optional tool goes last, so the tool block reads the same up to it with or without a project.
+        openai_tools = mcp_tools_to_openai(listed.tools) + LOCAL_TOOLS + [FINAL_ANSWER] + ([NOTE_TOOL] if notes else [])
         schemas = {t["function"]["name"]: t["function"]["parameters"] for t in openai_tools}
         state: AgentState = {
             "messages": [{"role": "system", "content": system}, *_sanitize_history(history),
-                         {"role": "user", "content": question}],
+                         {"role": "user", "content": _turn_message(question, context, project)}],
             "rounds": 0, "data_calls": 0, "nudged": False, "tables": {}, "seen": {}, "pending": [],
             "final": None, "done": False,
         }

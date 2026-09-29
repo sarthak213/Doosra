@@ -4,7 +4,7 @@ import { apiGet, apiSend } from "../api.js";
 import { useCopilotContext } from "../copilot/CopilotProvider.jsx";
 import { ScatterMatrix } from "../components/kit/Charts.jsx";
 import DataTable from "../components/kit/DataTable.jsx";
-import { FilterBar, MetricPicker, RoleToggle } from "../components/kit/Inputs.jsx";
+import { FilterBar, MetricPicker, RoleToggle, filtersFor } from "../components/kit/Inputs.jsx";
 import Panel, { ErrorNote, Loading } from "../components/kit/Panel.jsx";
 import { formatValue } from "../components/kit/theme.js";
 import { useFetch } from "../hooks/useFetch.js";
@@ -19,7 +19,7 @@ export default function PlayerMatrix() {
   const [selected, setSelected] = useState(null);
   const wl = useFetch(() => apiGet("/api/watchlist"), "watchlist");
   const watch = wl.data?.players || [];
-  const body = { role: st.role, x: st.x, y: st.y, min_balls: st.min_balls, filters: st.filters };
+  const body = { role: st.role, x: st.x, y: st.y, min_balls: st.min_balls, filters: filtersFor(st.role, st.filters) };
   const res = useFetch((s) => apiSend("/api/matrix", body, "POST", s), JSON.stringify(body));
 
   const points = useMemo(() => (res.data?.rows || []).map((r) => Object.fromEntries(res.data.columns.map((c, i) => [c, r[i]]))), [res.data]);
@@ -51,7 +51,7 @@ export default function PlayerMatrix() {
         </label>
       </div>
       <div className="controls-row">
-        <FilterBar filters={st.filters} onChange={(f) => set({ filters: f })} />
+        <FilterBar filters={st.filters} role={st.role} onChange={(f) => set({ filters: f })} />
       </div>
 
       <div className="matrix-layout">

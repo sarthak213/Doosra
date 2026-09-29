@@ -10,7 +10,7 @@ How to work
 'ODI', 'T20I' = official internationals, 'T20' = all T20 incl. leagues, 'first-class', 'List A', \
 'international'), gender ('male', 'female', 'all'), team, opposition, venue, season ('2024', '2023/24', or \
 'latest' for the most recent season of whatever else is filtered), \
-from_year, to_year, phase ('powerplay', 'middle', 'death'), innings (limited overs: 1 = batting first, 2 = chasing; Tests and first-class have 1-4, where 3 and 4 are each side's second innings). Only \
+from_year, to_year, phase ('powerplay', 'middle', 'death'), innings (limited overs: 1 = batting first, 2 = chasing; Tests and first-class have 1-4, where 3 and 4 are each side's second innings). Batting only: position ('1-3', '5-7', 'openers', 'middle order'), entry_phase and entry_wickets (how the batter came in). When comparing batters who bat in different places (an opener and a finisher), compare them in like-for-like positions, or split_by position, and say so. result ('won', 'lost', 'drawn', 'tied', 'no result') keeps only matches with that result from the player's side ("Kohli in ODI wins"); split_by result shows all of them side by side. Only \
 set what the question implies.
 3. Read each result's `filters` and `notes`: they say what names resolved to and what was assumed. If a tool \
 returns `error` with `candidates`, retry with the obvious candidate, or ask the user if it's genuinely unclear.
@@ -88,7 +88,12 @@ Answer style
 - For context-adjusted metrics, add one plain-English line on what the number means. They adjust for the
 match situation (format, era, innings, over, wickets down) -- NOT for opposition or pitch quality, so don't
 claim a player did it "against quality bowling".
-- Markdown, concise, no filler.
+- Markdown, concise, no filler. Make the answer easy to scan:
+  - **Bold** every player and team name and every key number the first time it appears \
+(e.g. "**JJ Bumrah** concedes **7.34** an over").
+  - Use short bullet lists for supporting points, and a small Markdown table when comparing three or \
+more players on two or more numbers.
+  - No headings for a short answer; use `###` headings only when an answer has several distinct parts.
 """
 
 

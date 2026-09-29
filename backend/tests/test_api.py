@@ -100,7 +100,7 @@ def test_chat_stream_with_context(client, monkeypatch):
     seen = {}
 
     async def fake_complete(messages, tools):
-        seen["system"] = messages[0]["content"]
+        seen["system"] = "\n".join(m.get("content") or "" for m in messages)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Looks good.", tool_calls=[]))])
 
     monkeypatch.setattr(graph, "_complete", fake_complete)
@@ -247,7 +247,7 @@ def test_project_brief_and_enabled_notes_reach_the_agent(client, ws, monkeypatch
     seen = []
 
     async def fake_complete(messages, tools):
-        seen.append(messages[0]["content"])
+        seen.append("\n".join(m.get("content") or "" for m in messages))
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=[]))])
 
     monkeypatch.setattr(graph, "_complete", fake_complete)
@@ -270,7 +270,7 @@ def test_explaining_a_board_builds_the_digest_on_the_server(client, ws, monkeypa
     seen = []
 
     async def fake_complete(messages, tools):
-        seen.append(messages[0]["content"])
+        seen.append("\n".join(m.get("content") or "" for m in messages))
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=[]))])
 
     monkeypatch.setattr(graph, "_complete", fake_complete)
@@ -339,3 +339,88 @@ def test_a_chat_that_is_still_answering_refuses_another_question(client, ws, mon
         assert client.post("/api/chat/stream", json={"question": "again", "chat_id": chat["id"]}).status_code == 409
     finally:
         chat_persist.ANSWERING.pop(chat["id"], None)
+
+
+@pytest.mark.parametrize("phase", ["powerplay", "middle", "death"])
+def test_every_player_view_works_within_a_phase(client, phase):
+    """A phase filter must never crash a view (it did: profile, percentiles, similar players and entry
+    points). Views asking for a fixed metric set leave out whole-innings figures and say so."""
+    f = {"phase": phase}
+    base = "/api/players/S Sharma"
+    for path, params in [("/profile", f), ("/form", {**f, "role": "batting"}), ("/percentiles", {**f, "role": "batting"}),
+                         ("/percentiles", {**f, "role": "bowling"}), ("/similar", {**f, "role": "batting", "min_balls": 1}),
+                         ("/similar", {**f, "role": "bowling", "min_balls": 1}), ("/entry-heatmap", f),
+                         ("/splits", {**f, "role": "batting", "split_by": "season"}),
+                         ("/splits", {**f, "role": "batting", "split_by": "season",       # the Player Hub's own columns
+                                      "metrics": "innings,runs,average,strike_rate,hundreds,fifties"}),
+                         ("/splits", {"role": "batting", "split_by": "phase", "metrics": "runs,hundreds"})]:
+        r = client.get(base + path, params=params)
+        assert r.status_code in (200, 400), (path, params, r.status_code, r.text[:200])
+        if r.status_code == 400:                      # a clear refusal, never a crash -- and only for "no data"
+            assert "no " in r.json().get("error", "").lower(), (path, r.json())
+    profile = client.get(base + "/profile", params=f).json()
+    assert "error" not in profile
+    for role in ("batting", "bowling"):             # the fixture player may have no record in some phases
+        if role in profile:
+            assert any("whole-innings" in n for n in profile[role]["summary"]["notes"])
+    assert "phase filter isn't applied" in " ".join(client.get(base + "/entry-heatmap", params=f).json()["notes"])
+    for body in ({"metrics": ["runs", "strike_rate"], "filters": f}, {"x": "strike_rate", "y": "dot_pct", "filters": f}):
+        endpoint = "/api/query" if "metrics" in body else "/api/matrix"
+        assert client.post(endpoint, json=body).status_code == 200
+    # asking for a whole-innings metric by name within a phase is still refused, with the reason
+    refused = client.post("/api/query", json={"metrics": ["match_factor"], "filters": f})
+    assert refused.status_code == 400 and "single phase" in refused.json()["error"]
+
+
+def test_batting_role_filters_narrow_the_figures(client):
+    everything = client.post("/api/query", json={"metrics": ["innings", "runs"], "players": ["S Sharma"]}).json()
+    top = client.post("/api/query", json={"metrics": ["innings", "runs"], "players": ["S Sharma"], "filters": {"position": "1-2"}}).json()
+    lower = client.post("/api/query", json={"metrics": ["innings", "runs"], "players": ["S Sharma"], "filters": {"position": "3+"}}).json()
+    total = everything["rows"][0][1]
+    parts = [((t["rows"][0][1] if t["rows"] else 0) or 0) for t in (top, lower)]   # no innings there = empty row
+    assert sum(parts) == total and top["filters"]["position"] == "batting at 1-2"
+    # the same filters reach every Player Hub panel through the query string
+    r = client.get("/api/players/S Sharma/profile", params={"position": "1-2"})
+    assert r.status_code == 200 and r.json()["batting"]["summary"]["filters"]["position"] == "batting at 1-2"
+    split = client.get("/api/players/S Sharma/splits", params={"role": "batting", "split_by": "position"}).json()
+    assert split["columns"][0] == "position"          # one player: no player column
+
+
+def test_batting_role_filters_are_refused_where_they_cant_apply(client):
+    bowl = client.post("/api/query", json={"role": "bowling", "metrics": ["wickets"], "filters": {"position": "1-3"}})
+    assert bowl.status_code == 400 and "batting figures only" in bowl.json()["error"]
+    mixed = client.post("/api/query", json={"metrics": ["runs"], "filters": {"entry_phase": "death", "phase": "death"}})
+    assert mixed.status_code == 400 and "per innings" in mixed.json()["error"]
+    assert client.post("/api/query", json={"metrics": ["runs"], "filters": {"position": "4", "phase": "death"}}).status_code == 200
+    assert client.post("/api/query", json={"metrics": ["runs"], "filters": {"position": "twelve"}}).status_code == 400
+
+
+def test_compare_breaks_players_down_by_phase(client):
+    body = client.post("/api/compare", json={"players": ["V Kohli", "S Sharma"], "role": "batting"}).json()
+    t = body["by_phase"]
+    assert t["columns"][:2] == ["phase", "player"]
+    phases = [r[0] for r in t["rows"]]
+    rank = {"powerplay": 0, "middle": 1, "death": 2}
+    assert phases == sorted(phases, key=rank.get)                       # powerplay, middle, death -- not alphabetical
+    first_phase = [r[1] for r in t["rows"] if r[0] == phases[0]]
+    order = [r[0] for r in body["table"]["rows"]]
+    assert first_phase == [p for p in order if p in first_phase]        # players in the order they were picked
+    bowl = client.post("/api/compare", json={"players": ["S Sharma"], "role": "bowling"}).json()["by_phase"]
+    assert "economy" in bowl["columns"] and "error" not in bowl
+    filtered = client.post("/api/compare", json={"players": ["S Sharma"], "filters": {"phase": "death"}}).json()
+    assert "clear the Phase filter" in filtered["by_phase"]["error"]
+
+
+def test_match_result_filter_and_split_agree(client):
+    base = {"metrics": ["innings", "runs"], "players": ["S Sharma"]}
+    split = client.post("/api/query", json={**base, "split_by": "result"}).json()
+    by = {r[0]: r[1] for r in split["rows"]}                      # one player: first column is the result
+    assert set(by) <= {"won", "lost", "drawn", "tied", "no result"} and by
+    for result, innings in by.items():
+        f = client.post("/api/query", json={**base, "filters": {"result": result}}).json()
+        assert f["rows"][0][1] == innings and f["filters"]["result"]
+    # bowling and per-phase figures take it too; a bad value is a clear 400
+    assert client.post("/api/query", json={"role": "bowling", "metrics": ["wickets"], "filters": {"result": "lost", "phase": "death"}}).status_code == 200
+    bad = client.post("/api/query", json={"metrics": ["runs"], "filters": {"result": "maybe"}})
+    assert bad.status_code == 400
+    assert client.get("/api/players/S Sharma/profile", params={"result": "won"}).status_code == 200

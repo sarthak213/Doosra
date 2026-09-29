@@ -125,3 +125,16 @@ class TestBackupAndMigration:
         assert {"projects", "chats", "boards", "notes", "messages", "usage"} <= set(inspect(w.engine()).get_table_names())
         w._engines.clear()                    # re-open: migrations don't run twice
         assert [v["name"] for v in w.list_views("local")] == ["Old query"]
+
+
+def test_recorder_saves_reasoning_as_steps_but_not_live_drafts():
+    from api.chat_persist import Recorder
+    c = w.create_chat("u1")
+    r = Recorder("u1", c["id"])
+    for e in [{"type": "mode", "thinking": True}, {"type": "draft", "kind": "reasoning", "text": "weigh "},
+              {"type": "draft", "kind": "reasoning", "text": "it"}, {"type": "tool_call", "tool": "leaderboard"},
+              {"type": "draft", "kind": "answer", "text": "Bum"}, {"type": "final_answer", "content": "Bumrah."}]:
+        r.see(e)
+    r.save()
+    events = w.get_chat("u1", c["id"])["messages"][0]["events"]["events"]
+    assert [e["type"] for e in events] == ["thought", "tool_call"] and events[0]["content"] == "weigh it"

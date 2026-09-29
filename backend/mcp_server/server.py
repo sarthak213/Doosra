@@ -42,7 +42,11 @@ Filters = Annotated[dict[str, Any] | None, Field(description=(
     "'T20I', 'T20' = all T20 incl. leagues, 'first-class', 'List A', 'international'), gender ('male', "
     "'female', 'all'), team, opposition, venue, season ('2024', '2023/24' or 'latest'), from_year, to_year, phase "
     "('powerplay', 'middle', 'death'), innings (limited overs: 1 = batting first, 2 = chasing; Tests and "
-    "first-class: 1-4, where 3 and 4 are each side's second innings)."))]
+    "first-class: 1-4, where 3 and 4 are each side's second innings). Batting only (how the batter came in): "
+    "position ('4', '1-3', '5+', 'openers', 'top order', 'middle order', 'lower order'), entry_phase ('powerplay', "
+    "'middle', 'death': the phase when they walked in), entry_wickets ('0', '1-2', '3+': wickets down when they "
+    "walked in). Use position to compare batters in like-for-like roles. result ('won', 'lost', 'drawn', "
+    "'tied', 'no result'): only matches with that result, from the player's side."))]
 Metrics = Annotated[list[str] | None, Field(description="Metric ids from search_metrics; defaults to a sensible set.")]
 SplitBy = Annotated[str | None, Field(description=(
     "Break the figures down by: " + ", ".join(registry.DIMENSIONS) + "."))]

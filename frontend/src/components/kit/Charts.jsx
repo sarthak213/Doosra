@@ -15,6 +15,19 @@ import {
 } from "recharts";
 import { AXIS_TEXT, GRID, INK, NEUTRAL_POINT, SERIES, TICK, TOOLTIP, formatValue, humanize } from "./theme.js";
 
+// The plotting area. It fills whatever room its panel has (so a chart beside a taller neighbour
+// isn't left floating in empty space) and never goes below `height`. The chart is drawn in an
+// absolutely positioned layer, so it takes its size from the panel and never props the panel open.
+function ChartArea({ height, children }) {
+  return (
+    <div className="chart-area" style={{ minHeight: height }}>
+      <div className="chart-area-inner">
+        <ResponsiveContainer width="100%" height="100%">{children}</ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
 function Legend({ items }) {
   return (
     <ul className="chart-legend">
@@ -58,7 +71,7 @@ export function LineChartKit({ data, x, series, references = [], height = 280, x
   return (
     <div className="chart-block">
       {series.length > 1 && <Legend items={series.map((s, i) => ({ label: s.label, color: s.color || SERIES[i] }))} />}
-      <ResponsiveContainer width="100%" height={height}>
+      <ChartArea height={height}>
         <LineChart data={data} margin={{ top: 10, right: series.length > 1 ? 96 : 24, left: 4, bottom: 4 }}>
           <CartesianGrid stroke={GRID} vertical={false} />
           <XAxis dataKey={x} stroke={AXIS_TEXT} tick={TICK} tickLine={false} minTickGap={24}
@@ -80,7 +93,7 @@ export function LineChartKit({ data, x, series, references = [], height = 280, x
               ) : null) : undefined} />
           ))}
         </LineChart>
-      </ResponsiveContainer>
+      </ChartArea>
     </div>
   );
 }
@@ -97,7 +110,7 @@ export function BarChartKit({ data, x, series, height = 280, xLabel, yLabel, hor
   return (
     <div className="chart-block">
       {legend && <Legend items={series.map((s, i) => ({ label: s.label, color: s.color || SERIES[i] }))} />}
-      <ResponsiveContainer width="100%" height={h}>
+      <ChartArea height={h}>
         <BarChart data={data} layout={sideways ? "vertical" : "horizontal"} barCategoryGap="22%" barGap={2}
           margin={{ top: 10, right: 24, left: 4, bottom: xLabel ? 22 : 4 }}>
           <CartesianGrid stroke={GRID} horizontal={!sideways} vertical={sideways} />
@@ -122,7 +135,7 @@ export function BarChartKit({ data, x, series, height = 280, xLabel, yLabel, hor
               radius={sideways ? [0, 4, 4, 0] : [4, 4, 0, 0]} maxBarSize={28} isAnimationActive={false} />
           ))}
         </BarChart>
-      </ResponsiveContainer>
+      </ChartArea>
     </div>
   );
 }
@@ -155,7 +168,7 @@ export function ScatterMatrix({ points, xKey, yKey, xLabel, yLabel, medians, hig
     <div className="chart-block">
       <Legend items={[{ label: pointLabel, color: NEUTRAL_POINT }, ...(hl.length ? [{ label: "Watchlist", color: SERIES[0] }] : []),
         ...(sel.length ? [{ label: selected, color: SERIES[1] }] : [])]} />
-      <ResponsiveContainer width="100%" height={height}>
+      <ChartArea height={height}>
         <ScatterChart margin={{ top: 16, right: 96, bottom: 28, left: 8 }}>
           <CartesianGrid stroke={GRID} />
           <XAxis type="number" dataKey={xKey} name={xLabel} stroke={AXIS_TEXT} tick={TICK} domain={["auto", "auto"]}
@@ -175,7 +188,7 @@ export function ScatterMatrix({ points, xKey, yKey, xLabel, yLabel, medians, hig
           <Scatter data={sel} fill={SERIES[1]} onClick={(p) => onSelect?.(p.player)} isAnimationActive={false}
             label={{ dataKey: "player", position: "top", fill: INK, fontSize: 12 }} />
         </ScatterChart>
-      </ResponsiveContainer>
+      </ChartArea>
     </div>
   );
 }
