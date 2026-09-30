@@ -177,6 +177,31 @@ def mcp_tools_to_openai(mcp_tools) -> list[dict]:
     return out
 
 
+def _compact_schema(schema):
+    """A parameter schema without the noise: `X or null` becomes X, and defaults and descriptions go."""
+    if isinstance(schema, list):
+        return [_compact_schema(v) for v in schema]
+    if not isinstance(schema, dict):
+        return schema
+    if "anyOf" in schema:
+        kept = [v for v in schema["anyOf"] if v != {"type": "null"}]
+        if len(kept) == 1:
+            schema = {**{k: v for k, v in schema.items() if k != "anyOf"}, **kept[0]}
+    return {k: _compact_schema(v) for k, v in schema.items() if k not in ("default", "description", "title")}
+
+
+def compact_tools(tools: list[dict]) -> list[dict]:
+    """The tool list for Doosra's fine-tuned model: the same names and parameters, each description cut to its
+    first sentence and the schemas without noise (the model learned what the tools are for in training)."""
+    out = []
+    for t in tools:
+        f = t["function"]
+        first = re.split(r"(?<=[a-z0-9)'][.!?])\s+(?=[A-Z])", " ".join((f.get("description") or "").split()), maxsplit=1)[0]
+        out.append({"type": "function", "function": {"name": f["name"], "description": first,
+                                                     "parameters": _compact_schema(f["parameters"])}})
+    return out
+
+
 _ARG_ALIASES = {"name": "player", "stat_type": "role", "n": "limit", "top": "limit", "top_n": "limit",
                 "sql": "query", "sort_by": "metric"}
 
