@@ -68,10 +68,12 @@ print("platform:", "Kaggle" if ON_KAGGLE else "Colab", "| GPU:", torch.cuda.get_
       "| memory GB:", round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1))
 GPU_GB = torch.cuda.get_device_properties(0).total_memory / 1e9
 BF16 = torch.cuda.is_bf16_supported()      # A100, L4, G4: yes. T4: no, and Qwen3.5 then trains in slow float32
-BATCH = 4 if GPU_GB > 38 else 2 if GPU_GB > 22 else 1   # 16 conversations per step either way
-print("bfloat16:", BF16, "| batch:", BATCH)
+LOAD_4BIT = GPU_GB < 38                    # 40 GB+ holds the model in 16-bit: faster than QLoRA's 4-bit weights
+BATCH = 2 if GPU_GB > 22 else 1           # 16 conversations per step either way
+CKPT = f"{WORK}/checkpoints-{RUN}" + ("-smoke" if SMOKE else "")   # a smoke run never resumes a real one
+print("bfloat16:", BF16, "| 4-bit:", LOAD_4BIT, "| batch:", BATCH)
 RUN_LOG = {"run": RUN, "platform": "Kaggle" if ON_KAGGLE else "Colab", "gpu": torch.cuda.get_device_name(0),
-           "config": CFG, "bf16": BF16, "batch": BATCH, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "events": []}"""),
+           "config": CFG, "bf16": BF16, "load_4bit": LOAD_4BIT, "batch": BATCH, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "events": []}"""),
 ("code", """from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 data = load_dataset(DATASET)
@@ -82,7 +84,7 @@ if SMOKE:
     data["train"], data["validation"] = data["train"].select(range(64)), data["validation"].select(range(8))
 print(data)"""),
 ("code", """from unsloth import FastModel
-model, tokenizer = FastModel.from_pretrained(BASE, max_seq_length=MAX_SEQ, load_in_4bit=True, full_finetuning=False)
+model, tokenizer = FastModel.from_pretrained(BASE, max_seq_length=MAX_SEQ, load_in_4bit=LOAD_4BIT, full_finetuning=False)
 model = FastModel.get_peft_model(
     model, finetune_vision_layers=False, finetune_language_layers=True, finetune_attention_modules=True,
     finetune_mlp_modules=True, r=CFG["lora_r"], lora_alpha=CFG["lora_alpha"], lora_dropout=0, bias="none",
@@ -123,7 +125,7 @@ class TimeBudget(TrainerCallback):
             control.should_save, control.should_training_stop = True, True
 
 args = SFTConfig(
-    output_dir=f"{WORK}/checkpoints-{RUN}", dataset_text_field="text", max_seq_length=MAX_SEQ,
+    output_dir=CKPT, dataset_text_field="text", max_seq_length=MAX_SEQ,
     per_device_train_batch_size=BATCH, per_device_eval_batch_size=1,   # eval at batch 8 ran out of memory on a T4
     gradient_accumulation_steps=16 // BATCH, num_train_epochs=CFG["epochs"],
     max_steps=4 if SMOKE else -1, learning_rate=CFG["learning_rate"], lr_scheduler_type="cosine", warmup_steps=5,
@@ -137,7 +139,7 @@ trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=train, eval_datas
 trainer = train_on_responses_only(trainer, instruction_part="<|im_start|>user\\n",
                                   response_part="<|im_start|>assistant\\n")"""),
 ("code", """import glob
-resume = bool(glob.glob(f"{WORK}/checkpoints-{RUN}/checkpoint-*"))
+resume = bool(glob.glob(f"{CKPT}/checkpoint-*"))
 T_START = time.time()
 stats = trainer.train(resume_from_checkpoint=resume)
 RUN_LOG["train_seconds"] = round(time.time() - T_START)
@@ -146,7 +148,8 @@ RUN_LOG["log_history"] = trainer.state.log_history
 RUN_LOG["metrics"] = stats.metrics
 RUN_LOG["peak_memory_gb"] = round(torch.cuda.max_memory_reserved() / 1e9, 1)
 print(stats.metrics, "| peak GPU memory GB:", RUN_LOG["peak_memory_gb"])
-per_step = stats.metrics["train_runtime"] / max(trainer.state.global_step, 1)
+eval_seconds = sum(h.get("eval_runtime", 0) for h in trainer.state.log_history)
+per_step = (stats.metrics["train_runtime"] - eval_seconds) / max(trainer.state.global_step, 1)   # training only
 full_steps = N_TRAIN * CFG["epochs"] // 16 if SMOKE else trainer.state.global_step
 print(f"{per_step:.0f} s per step; a full run is ~{full_steps} steps = ~{per_step * full_steps / 3600:.1f} hours")"""),
 ("code", """# three held-out questions, answered by the fine-tuned model with the app's tool list
