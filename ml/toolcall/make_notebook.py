@@ -26,7 +26,8 @@ Exports a GGUF (Q4_K_M) that Doosra's built-in llama.cpp engine runs, and pushes
    Colab: the key icon in the left bar, with notebook access on. Colab also asks to connect Google Drive, where
    checkpoints are kept so a disconnected run resumes.
 3. **Configuration:** set `RUN` in the next cell: `"A"` on Kaggle, `"B"` on Colab, so the two runs compare
-   two configurations (LoRA rank 16 at a higher learning rate vs rank 32 at a lower one; 2 epochs each).
+   two configurations (A: LoRA rank 16, a higher learning rate, 1 epoch; B: rank 32, a lower one, 2 epochs).
+   To turn a saved checkpoint into a GGUF without training, set `EXPORT` to its folder name.
 4. *Run all.* Checkpoints are saved as training goes, so if a session drops, run all again and it resumes."""),
 ("code", """import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"   # one GPU: Kaggle's second T4 would split the model and slow it down
@@ -36,13 +37,14 @@ TRAIN_EXAMPLES = None  # None: all of them. On a free T4 (float32, ~3 min per 16
 HOURS = 20           # stop training (and save) after this; on a free 12-hour session use 10.5
 
 CONFIGS = {
-    "A": dict(lora_r=16, lora_alpha=16, learning_rate=2e-4, epochs=2),
+    "A": dict(lora_r=16, lora_alpha=16, learning_rate=2e-4, epochs=1),   # B showed a 2nd epoch doesn't lower validation loss
     "B": dict(lora_r=32, lora_alpha=32, learning_rate=1e-4, epochs=2),
 }
 CFG = CONFIGS[RUN]
 BASE = "unsloth/Qwen3.5-4B"
 DATASET = "Sarthak213/doosra-toolcalls"
-OUT_REPO = f"Sarthak213/doosra-qwen3.5-4b-toolcalls-{RUN.lower()}"
+EXPORT = None        # a saved checkpoint folder in the Drive work folder to export instead of training, e.g. "keep-B-step350"
+OUT_REPO = f"Sarthak213/doosra-qwen3.5-4b-toolcalls-{RUN.lower()}" + (f"-{EXPORT.rsplit('-', 1)[-1]}" if EXPORT else "")
 MAX_SEQ = 6144       # conversations run to ~5.4k tokens with the tool list
 print(RUN, CFG)"""),
 ("code", """%%capture
@@ -84,11 +86,14 @@ if SMOKE:
     data["train"], data["validation"] = data["train"].select(range(64)), data["validation"].select(range(8))
 print(data)"""),
 ("code", """from unsloth import FastModel
-model, tokenizer = FastModel.from_pretrained(BASE, max_seq_length=MAX_SEQ, load_in_4bit=LOAD_4BIT, full_finetuning=False)
-model = FastModel.get_peft_model(
-    model, finetune_vision_layers=False, finetune_language_layers=True, finetune_attention_modules=True,
-    finetune_mlp_modules=True, r=CFG["lora_r"], lora_alpha=CFG["lora_alpha"], lora_dropout=0, bias="none",
-    use_gradient_checkpointing="unsloth", random_state=3407)
+if EXPORT:          # the base model with a saved adapter: nothing to train
+    model, tokenizer = FastModel.from_pretrained(f"{WORK}/{EXPORT}", max_seq_length=MAX_SEQ, load_in_4bit=LOAD_4BIT)
+else:
+    model, tokenizer = FastModel.from_pretrained(BASE, max_seq_length=MAX_SEQ, load_in_4bit=LOAD_4BIT, full_finetuning=False)
+    model = FastModel.get_peft_model(
+        model, finetune_vision_layers=False, finetune_language_layers=True, finetune_attention_modules=True,
+        finetune_mlp_modules=True, r=CFG["lora_r"], lora_alpha=CFG["lora_alpha"], lora_dropout=0, bias="none",
+        use_gradient_checkpointing="unsloth", random_state=3407)
 tok = getattr(tokenizer, "tokenizer", tokenizer)   # the text tokenizer inside a vision-language processor
 try:
     import fla
@@ -113,45 +118,51 @@ valid = data["validation"].select(range(min(50, len(data["validation"])))).map(
 lengths = [len(tok(t)["input_ids"]) for t in train.select(range(min(300, len(train))))["text"]]
 print("tokens per example: median", sorted(lengths)[len(lengths) // 2], "max", max(lengths))
 print(train[0]["text"][-1500:])"""),
-("code", """from trl import SFTTrainer, SFTConfig
-from transformers import TrainerCallback
-from unsloth.chat_templates import train_on_responses_only
+("code", """if EXPORT:
+    print("export only: no training")
+else:
+    from trl import SFTTrainer, SFTConfig
+    from transformers import TrainerCallback
+    from unsloth.chat_templates import train_on_responses_only
 
-class TimeBudget(TrainerCallback):
-    \"\"\"Save and stop once HOURS of training have passed, so a long run still exports within the session.\"\"\"
-    def on_step_end(self, args, state, control, **kw):
-        if time.time() - T_START > HOURS * 3600:
-            RUN_LOG["events"].append(f"stopped by the time budget at step {state.global_step}")
-            control.should_save, control.should_training_stop = True, True
+    class TimeBudget(TrainerCallback):
+        \"\"\"Save and stop once HOURS of training have passed, so a long run still exports within the session.\"\"\"
+        def on_step_end(self, args, state, control, **kw):
+            if time.time() - T_START > HOURS * 3600:
+                RUN_LOG["events"].append(f"stopped by the time budget at step {state.global_step}")
+                control.should_save, control.should_training_stop = True, True
 
-args = SFTConfig(
-    output_dir=CKPT, dataset_text_field="text", max_seq_length=MAX_SEQ,
-    per_device_train_batch_size=BATCH, per_device_eval_batch_size=1,   # eval at batch 8 ran out of memory on a T4
-    gradient_accumulation_steps=16 // BATCH, num_train_epochs=CFG["epochs"],
-    max_steps=4 if SMOKE else -1, learning_rate=CFG["learning_rate"], lr_scheduler_type="cosine", warmup_steps=5,
-    logging_steps=1 if SMOKE else 5, eval_strategy="steps", eval_steps=2 if SMOKE else 50, save_strategy="steps",
-    save_steps=2 if SMOKE else 50, save_total_limit=2, optim="adamw_8bit", weight_decay=0.01,
-    bf16=BF16, fp16=not BF16,
-    prediction_loss_only=True, report_to="none", seed=3407)
-trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=train, eval_dataset=valid, args=args,
-                     callbacks=[TimeBudget()])
-# learn only the assistant's turns (tool calls and answers), not the prompt, question or tool results
-trainer = train_on_responses_only(trainer, instruction_part="<|im_start|>user\\n",
-                                  response_part="<|im_start|>assistant\\n")"""),
-("code", """import glob
-resume = bool(glob.glob(f"{CKPT}/checkpoint-*"))
-T_START = time.time()
-stats = trainer.train(resume_from_checkpoint=resume)
-RUN_LOG["train_seconds"] = round(time.time() - T_START)
-RUN_LOG["resumed"] = resume
-RUN_LOG["log_history"] = trainer.state.log_history
-RUN_LOG["metrics"] = stats.metrics
-RUN_LOG["peak_memory_gb"] = round(torch.cuda.max_memory_reserved() / 1e9, 1)
-print(stats.metrics, "| peak GPU memory GB:", RUN_LOG["peak_memory_gb"])
-eval_seconds = sum(h.get("eval_runtime", 0) for h in trainer.state.log_history)
-per_step = (stats.metrics["train_runtime"] - eval_seconds) / max(trainer.state.global_step, 1)   # training only
-full_steps = N_TRAIN * CFG["epochs"] // 16 if SMOKE else trainer.state.global_step
-print(f"{per_step:.0f} s per step; a full run is ~{full_steps} steps = ~{per_step * full_steps / 3600:.1f} hours")"""),
+    args = SFTConfig(
+        output_dir=CKPT, dataset_text_field="text", max_seq_length=MAX_SEQ,
+        per_device_train_batch_size=BATCH, per_device_eval_batch_size=1,   # eval at batch 8 ran out of memory on a T4
+        gradient_accumulation_steps=16 // BATCH, num_train_epochs=CFG["epochs"],
+        max_steps=4 if SMOKE else -1, learning_rate=CFG["learning_rate"], lr_scheduler_type="cosine", warmup_steps=5,
+        logging_steps=1 if SMOKE else 5, eval_strategy="steps", eval_steps=2 if SMOKE else 50, save_strategy="steps",
+        save_steps=2 if SMOKE else 50, save_total_limit=2, optim="adamw_8bit", weight_decay=0.01,
+        bf16=BF16, fp16=not BF16,
+        prediction_loss_only=True, report_to="none", seed=3407)
+    trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=train, eval_dataset=valid, args=args,
+                         callbacks=[TimeBudget()])
+    # learn only the assistant's turns (tool calls and answers), not the prompt, question or tool results
+    trainer = train_on_responses_only(trainer, instruction_part="<|im_start|>user\\n",
+                                      response_part="<|im_start|>assistant\\n")"""),
+("code", """if EXPORT:
+    print("export only: no training")
+else:
+    import glob
+    resume = bool(glob.glob(f"{CKPT}/checkpoint-*"))
+    T_START = time.time()
+    stats = trainer.train(resume_from_checkpoint=resume)
+    RUN_LOG["train_seconds"] = round(time.time() - T_START)
+    RUN_LOG["resumed"] = resume
+    RUN_LOG["log_history"] = trainer.state.log_history
+    RUN_LOG["metrics"] = stats.metrics
+    RUN_LOG["peak_memory_gb"] = round(torch.cuda.max_memory_reserved() / 1e9, 1)
+    print(stats.metrics, "| peak GPU memory GB:", RUN_LOG["peak_memory_gb"])
+    eval_seconds = sum(h.get("eval_runtime", 0) for h in trainer.state.log_history)
+    per_step = (stats.metrics["train_runtime"] - eval_seconds) / max(trainer.state.global_step, 1)   # training only
+    full_steps = N_TRAIN * CFG["epochs"] // 16 if SMOKE else trainer.state.global_step
+    print(f"{per_step:.0f} s per step; a full run is ~{full_steps} steps = ~{per_step * full_steps / 3600:.1f} hours")"""),
 ("code", """# three held-out questions, answered by the fine-tuned model with the app's tool list
 FastModel.for_inference(model)
 for ex in data["test"].select(range(3)):
@@ -170,8 +181,10 @@ model.push_to_hub_gguf(OUT_REPO, tokenizer, quantization_method="q4_k_m", token=
 RUN_LOG["gguf_seconds"] = round(time.time() - t0)
 RUN_LOG["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
 from huggingface_hub import HfApi
-json.dump(RUN_LOG, open(f"{WORK}/run_log.json", "w"), indent=1, default=str)
-HfApi(token=HF_TOKEN).upload_file(path_or_fileobj=f"{WORK}/run_log.json", path_in_repo="run_log.json", repo_id=OUT_REPO)
+RUN_LOG["exported_from"] = EXPORT
+log_path = f"{WORK}/run_log-{OUT_REPO.split('/')[-1]}.json"      # one per run, not overwritten by the next
+json.dump(RUN_LOG, open(log_path, "w"), indent=1, default=str)
+HfApi(token=HF_TOKEN).upload_file(path_or_fileobj=log_path, path_in_repo="run_log.json", repo_id=OUT_REPO)
 print("pushed to https://huggingface.co/" + OUT_REPO)"""),
 ]
 
