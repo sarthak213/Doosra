@@ -100,5 +100,22 @@ def main() -> None:
         engine.stop()
 
 
+def clean() -> None:
+    """Undo rewrites that change only capitals, punctuation or spacing: they add no variety."""
+    def key(q: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", q.lower()).strip()
+
+    for split in ("train", "validation", "test"):
+        path = OUT / f"{split}.jsonl"
+        rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()]
+        undone = 0
+        for r in rows:
+            if r.get("original_question") and key(r["original_question"]) == key(r["question"]):
+                r["question"] = r["messages"][1]["content"] = r.pop("original_question")
+                undone += 1
+        path.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in rows), encoding="utf-8")
+        print(f"{split}: {undone} trivial rewrites undone, {sum('original_question' in r for r in rows)} kept")
+
+
 if __name__ == "__main__":
-    main()
+    clean() if "--clean" in sys.argv else main()
