@@ -64,6 +64,7 @@ RUN_LOG = {"run": RUN, "platform": "Kaggle" if ON_KAGGLE else "Colab", "gpu": to
 from huggingface_hub import hf_hub_download
 data = load_dataset(DATASET)
 TOOLS = json.load(open(hf_hub_download(DATASET, "tools.json", repo_type="dataset")))
+N_TRAIN = len(data["train"])
 if SMOKE:
     data["train"], data["validation"] = data["train"].select(range(64)), data["validation"].select(range(16))
 print(data)"""),
@@ -115,7 +116,7 @@ RUN_LOG["log_history"] = trainer.state.log_history
 RUN_LOG["metrics"] = stats.metrics
 print(stats.metrics)
 per_step = RUN_LOG["train_seconds"] / max(trainer.state.global_step, 1)
-full_steps = len(data["train"]) * CFG["epochs"] // 16 if SMOKE else trainer.state.global_step
+full_steps = N_TRAIN * CFG["epochs"] // 16 if SMOKE else trainer.state.global_step
 print(f"{per_step:.0f} s per step; a full run is ~{full_steps} steps = ~{per_step * full_steps / 3600:.1f} hours")"""),
 ("code", """# three held-out questions, answered by the fine-tuned model with the app's tool list
 FastModel.for_inference(model)
