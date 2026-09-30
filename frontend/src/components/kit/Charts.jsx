@@ -13,6 +13,7 @@ import {
   YAxis,
   ZAxis,
 } from "recharts";
+import CsvButton from "./CsvButton.jsx";
 import { AXIS_TEXT, GRID, INK, NEUTRAL_POINT, SERIES, TICK, TOOLTIP, formatValue, humanize } from "./theme.js";
 
 // The plotting area. It fills whatever room its panel has (so a chart beside a taller neighbour
@@ -26,6 +27,26 @@ function ChartArea({ height, children }) {
       </div>
     </div>
   );
+}
+
+// The row above a chart: its legend (if any) and a CSV button for the data it plots. `csv` is
+// {name, data: () => ({columns, rows})}; false hides the button (the caller exports the data another way).
+function ChartTop({ legend, csv }) {
+  if (!legend && !csv) return null;
+  return (
+    <div className="chart-top">
+      {legend || <span />}
+      {csv && <CsvButton name={csv.name} data={csv.data} className="ghost-btn chart-csv" />}
+    </div>
+  );
+}
+
+function seriesCsv(name, data, x, series, xLabel) {
+  return {
+    name: name || series.map((s) => s.label).join(", ") || "doosra-chart",
+    data: () => ({ columns: [xLabel || humanize(x), ...series.map((s) => s.label || humanize(s.key))],
+                   rows: data.map((d) => [d[x], ...series.map((s) => d[s.key])]) }),
+  };
 }
 
 function Legend({ items }) {
@@ -44,7 +65,7 @@ function Legend({ items }) {
 // Several series over one x axis (form, career arcs). One y scale only:
 // callers pass series that share units. A legend appears for 2+ series, and
 // each line also carries a direct label at its last point.
-export function LineChartKit({ data, x, series, references = [], height = 280, xLabel, yLabel, yDomain }) {
+export function LineChartKit({ data, x, series, references = [], height = 280, xLabel, yLabel, yDomain, csvName, csv = true }) {
   if (!data?.length) return null;
   // End labels are placed in render order; one that would overlap an
   // already-placed label is nudged down so names never collide.
@@ -70,7 +91,8 @@ export function LineChartKit({ data, x, series, references = [], height = 280, x
   );
   return (
     <div className="chart-block">
-      {series.length > 1 && <Legend items={series.map((s, i) => ({ label: s.label, color: s.color || SERIES[i] }))} />}
+      <ChartTop legend={series.length > 1 && <Legend items={series.map((s, i) => ({ label: s.label, color: s.color || SERIES[i] }))} />}
+        csv={csv && seriesCsv(csvName, data, x, series, xLabel)} />
       <ChartArea height={height}>
         <LineChart data={data} margin={{ top: 10, right: series.length > 1 ? 96 : 24, left: 4, bottom: 4 }}>
           <CartesianGrid stroke={GRID} vertical={false} />
@@ -102,14 +124,15 @@ export function LineChartKit({ data, x, series, references = [], height = 280, x
 // players, teams, seasons). Bars are thin with rounded data-ends, a surface-
 // coloured 2px stroke keeps neighbours apart, and long category lists turn
 // horizontal so labels stay readable. One value axis only.
-export function BarChartKit({ data, x, series, height = 280, xLabel, yLabel, horizontal }) {
+export function BarChartKit({ data, x, series, height = 280, xLabel, yLabel, horizontal, csvName, csv = true }) {
   if (!data?.length) return null;
   const sideways = horizontal ?? data.length > 8;
   const h = sideways ? Math.max(height, data.length * (series.length * 14 + 12) + 48) : height;
   const legend = series.length > 1;
   return (
     <div className="chart-block">
-      {legend && <Legend items={series.map((s, i) => ({ label: s.label, color: s.color || SERIES[i] }))} />}
+      <ChartTop legend={legend && <Legend items={series.map((s, i) => ({ label: s.label, color: s.color || SERIES[i] }))} />}
+        csv={csv && seriesCsv(csvName, data, x, series, xLabel)} />
       <ChartArea height={h}>
         <BarChart data={data} layout={sideways ? "vertical" : "horizontal"} barCategoryGap="22%" barGap={2}
           margin={{ top: 10, right: 24, left: 4, bottom: xLabel ? 22 : 4 }}>
@@ -144,7 +167,7 @@ export function BarChartKit({ data, x, series, height = 280, xLabel, yLabel, hor
 // Points are neutral; watchlisted players are brass, the selected one blue.
 export function ScatterMatrix({ points, xKey, yKey, xLabel, yLabel, medians, highlighted = [], selected, onSelect,
   standouts = [], xBetterHigh = true, yBetterHigh = true, height = 460, medianLabel = "median",
-  pointLabel = "Qualified players" }) {
+  pointLabel = "Qualified players", csvName }) {
   if (!points?.length) return null;
   // Standouts (best on both axes) stay neutral but get a name label.
   const named = points.filter((p) => standouts.includes(p.player) && !highlighted.includes(p.player) && p.player !== selected);
@@ -166,8 +189,11 @@ export function ScatterMatrix({ points, xKey, yKey, xLabel, yLabel, medians, hig
   };
   return (
     <div className="chart-block">
-      <Legend items={[{ label: pointLabel, color: NEUTRAL_POINT }, ...(hl.length ? [{ label: "Watchlist", color: SERIES[0] }] : []),
-        ...(sel.length ? [{ label: selected, color: SERIES[1] }] : [])]} />
+      <ChartTop legend={<Legend items={[{ label: pointLabel, color: NEUTRAL_POINT }, ...(hl.length ? [{ label: "Watchlist", color: SERIES[0] }] : []),
+        ...(sel.length ? [{ label: selected, color: SERIES[1] }] : [])]} />}
+        csv={{ name: csvName || `${yLabel} vs ${xLabel}`,
+               data: () => ({ columns: ["Player", "Team", xLabel, yLabel, "Balls"],
+                              rows: points.map((p) => [p.player, p.team, p[xKey], p[yKey], p.balls]) }) }} />
       <ChartArea height={height}>
         <ScatterChart margin={{ top: 16, right: 96, bottom: 28, left: 8 }}>
           <CartesianGrid stroke={GRID} />
@@ -196,13 +222,20 @@ export function ScatterMatrix({ points, xKey, yKey, xLabel, yLabel, medians, hig
 // Grid of cells shaded by one metric (single hue, brass): rows x columns.
 // Cells with fewer than `minSample` (by subKey) aren't shaded -- a one-innings
 // 75 shouldn't glow brighter than a 300-innings 52.
-export function Heatmap({ rows, cols, cells, valueKey, labelKey, subKey, format, minSample = 5 }) {
+export function Heatmap({ rows, cols, cells, valueKey, labelKey, subKey, format, minSample = 5, csvName }) {
   const reliable = (c) => c && typeof c[valueKey] === "number" && (c[subKey] ?? 0) >= minSample;
   const vals = Object.values(cells).filter(reliable).map((c) => c[valueKey]);
   const max = Math.max(...vals, 1);
   const min = Math.min(...vals, 0);
   const shade = (v) => (typeof v !== "number" ? "transparent" : `rgba(176, 138, 58, ${0.12 + 0.78 * ((v - min) / (max - min || 1))})`);
+  const csv = {
+    name: csvName || `${humanize(valueKey)} by ${labelKey}`,
+    data: () => ({ columns: [labelKey, ...cols],
+                   rows: rows.map((r) => [r, ...cols.map((c) => cells[`${r}|${c}`]?.[valueKey] ?? "")]) }),
+  };
   return (
+    <>
+    <ChartTop csv={csv} />
     <div className="heatmap" style={{ gridTemplateColumns: `minmax(120px, auto) repeat(${cols.length}, minmax(64px, 1fr))` }}>
       <div className="heatmap-corner">{labelKey}</div>
       {cols.map((c) => (
@@ -231,14 +264,21 @@ export function Heatmap({ rows, cols, cells, valueKey, labelKey, subKey, format,
         </div>
       ))}
     </div>
+    </>
   );
 }
 
 // One row per metric, one bar per player (0-100 percentile).
-export function PercentileBars({ metrics, players, values, labels }) {
+export function PercentileBars({ metrics, players, values, labels, csvName }) {
   return (
     <div className="pct-bars">
-      {players.length > 1 && <Legend items={players.map((p, i) => ({ label: p, color: SERIES[i] }))} />}
+      <ChartTop legend={players.length > 1 && <Legend items={players.map((p, i) => ({ label: p, color: SERIES[i] }))} />}
+        csv={{ name: csvName || `Percentiles - ${players.join(", ")}`,
+               data: () => ({ columns: ["Metric", "Player", "Value", "Percentile"],
+                              rows: metrics.flatMap((m) => players.map((p) => {
+                                const v = values[`${m}|${p}`];
+                                return [labels?.[m] || humanize(m), p, v?.value ?? "", v?.percentile == null ? "" : Math.round(v.percentile)];
+                              })) }) }} />
       {metrics.map((m) => (
         <div className="pct-row" key={m}>
           <div className="pct-label">{labels?.[m] || humanize(m)}</div>
@@ -270,7 +310,7 @@ export function PercentileBars({ metrics, players, values, labels }) {
 // Match Replay's win-probability worm: team1's chance of winning after every ball, both innings on one
 // over axis. Wickets are dots on the line; key moments are numbered markers that match the list beside
 // the chart. One series, one y scale (0-100%), 50% dashed; hover shows the ball and both sides' chances.
-export function WinProbChart({ balls, overs, team1, team2, moments = [], height = 340, activeMoment, onMoment }) {
+export function WinProbChart({ balls, overs, team1, team2, moments = [], height = 340, activeMoment, onMoment, csvName }) {
   if (!balls?.length) return null;
   const momentAt = new Map(moments.map((m, i) => [`${m.innings}-${m.seq}`, i + 1]));
   const data = balls.map((b) => ({
@@ -314,11 +354,16 @@ export function WinProbChart({ balls, overs, team1, team2, moments = [], height 
   };
   return (
     <div className="chart-block">
-      <ul className="chart-legend">
-        <li><span className="legend-swatch" style={{ background: SERIES[0] }} aria-hidden="true" />{team1}'s chance of winning</li>
-        <li><span className="legend-dot" aria-hidden="true" />wicket</li>
-        {moments.length > 0 && <li><span className="legend-moment" aria-hidden="true">1</span>key moment</li>}
-      </ul>
+      <ChartTop legend={
+        <ul className="chart-legend">
+          <li><span className="legend-swatch" style={{ background: SERIES[0] }} aria-hidden="true" />{team1}'s chance of winning</li>
+          <li><span className="legend-dot" aria-hidden="true" />wicket</li>
+          {moments.length > 0 && <li><span className="legend-moment" aria-hidden="true">1</span>key moment</li>}
+        </ul>}
+        csv={{ name: csvName || `Win probability - ${team1} v ${team2}`,
+               data: () => ({ columns: ["Innings", "Over", "Batting team", "Score", "Wickets", `${team1} win %`, `${team2} win %`, "Wicket", "Ball"],
+                              rows: data.map((b) => [b.innings, `${Math.floor(b.legal / 6)}.${b.legal % 6}`, b.batting_team, b.score,
+                                b.wickets, b.pct, Math.round((100 - b.pct) * 10) / 10, b.wicket ? "yes" : "", b.text]) }) }} />
       <ChartArea height={height}>
         <LineChart data={data} margin={{ top: 16, right: 24, left: 4, bottom: 14 }}>
           <CartesianGrid stroke={GRID} vertical={false} />

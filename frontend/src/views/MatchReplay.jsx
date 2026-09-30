@@ -82,6 +82,7 @@ export default function MatchReplay() {
           explain={{ question: "Walk me through this match: where was it won and lost, and which moments mattered most?", data: story }}>
           <div className="replay-grid">
             <WinProbChart balls={r.balls} overs={overs} team1={m.team1} team2={m.team2} moments={r.moments}
+              csvName={`${m.team1} v ${m.team2} ${String(m.date).slice(0, 10)} - win probability`}
               activeMoment={active} onMoment={setActive} />
             <ol className="moments">
               {r.moments.map((k, i) => (
@@ -109,8 +110,10 @@ export default function MatchReplay() {
       <div className="replay-cards">
         {r.innings.map((i) => (
           <Panel key={i.innings} title={`${i.team} ${i.score}/${i.wickets}`} subtitle={`${i.overs} overs`}>
-            <DataTable table={card(i.innings, "batting")} compact maxHeight={420} />
-            <DataTable table={card(i.innings, "bowling")} compact maxHeight={320} />
+            <DataTable table={card(i.innings, "batting")} compact maxHeight={420}
+              csvName={`${m.team1} v ${m.team2} ${String(m.date).slice(0, 10)} - ${i.team} batting`} />
+            <DataTable table={card(i.innings, "bowling")} compact maxHeight={320}
+              csvName={`${m.team1} v ${m.team2} ${String(m.date).slice(0, 10)} - ${i.team} innings, bowling`} />
           </Panel>
         ))}
       </div>

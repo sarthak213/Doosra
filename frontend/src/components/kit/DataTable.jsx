@@ -1,24 +1,10 @@
 import { useMemo, useState } from "react";
+import CsvButton from "./CsvButton.jsx";
 import { formatValue, humanize } from "./theme.js";
-
-function toCsv(columns, rows) {
-  const esc = (v) => {
-    const s = v === null || v === undefined ? "" : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  return [columns.map(esc).join(","), ...rows.map((r) => r.map(esc).join(","))].join("\n");
-}
-
-function download(filename, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
-  const a = Object.assign(document.createElement("a"), { href: url, download: filename });
-  a.click();
-  URL.revokeObjectURL(url);
-}
 
 // A result envelope ({title, columns, rows, filters, notes, highlights}) as a
 // sortable table with CSV export. `labels` optionally maps column -> header.
-export default function DataTable({ table, labels, onRowClick, highlight = [], compact = false, maxHeight = 460 }) {
+export default function DataTable({ table, labels, onRowClick, highlight = [], compact = false, maxHeight = 460, csvName }) {
   const [sort, setSort] = useState(null); // {col, dir}
   const cols = table?.columns || [];
   const rows = useMemo(() => {
@@ -48,23 +34,24 @@ export default function DataTable({ table, labels, onRowClick, highlight = [], c
   const notes = Array.isArray(table.notes) ? table.notes : [];
   const playerCol = cols.indexOf("player");
 
+  const header = (col) => {
+    const i = cols.indexOf(col);
+    return labels?.[i] && typeof labels[i] === "string" ? labels[i] : humanize(col);
+  };
+
   function clickHeader(col) {
     setSort((s) => (s?.col === col ? { col, dir: s.dir === "desc" ? "asc" : "desc" } : { col, dir: "desc" }));
   }
 
   return (
     <figure className={`table-view${compact ? " table-compact" : ""}`}>
-      {(table.title || table.id) && (
-        <figcaption className="table-title">
-          <span>
-            {table.id && <span className="table-id">{table.id}</span>}
-            {table.title}
-          </span>
-          <button type="button" className="ghost-btn" onClick={() => download(`${(table.title || "doosra").slice(0, 60)}.csv`, toCsv(cols, rows))}>
-            CSV
-          </button>
-        </figcaption>
-      )}
+      <figcaption className="table-title">
+        <span>
+          {table.id && <span className="table-id">{table.id}</span>}
+          {table.title}
+        </span>
+        <CsvButton name={csvName || table.title || table.id || "doosra-table"} data={() => ({ columns: cols.map(header), rows })} />
+      </figcaption>
       <div className="table-scroll" style={{ maxHeight }}>
         <table>
           <thead>
@@ -72,7 +59,7 @@ export default function DataTable({ table, labels, onRowClick, highlight = [], c
               {cols.map((col, i) => (
                 <th key={col} scope="col" className={numericCols[i] ? "num" : undefined} aria-sort={sort?.col === col ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
                   <button type="button" className="th-btn" onClick={() => clickHeader(col)}>
-                    {labels?.[i] && typeof labels[i] === "string" ? labels[i] : humanize(col)}
+                    {header(col)}
                     {sort?.col === col && <span aria-hidden="true">{sort.dir === "asc" ? " ▲" : " ▼"}</span>}
                   </button>
                 </th>

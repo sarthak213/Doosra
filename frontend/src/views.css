@@ -647,6 +647,15 @@ select:focus,
   position: absolute;
   inset: 0;
 }
+.chart-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.chart-top .chart-legend { flex: 1 1 auto; }
+.chart-csv { flex: none; padding: 3px 9px; font-size: 12px; margin-bottom: 8px; }
+.chart-title { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .chart-legend {
   display: flex;
   flex-wrap: wrap;
