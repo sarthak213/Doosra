@@ -10,3 +10,6 @@ venv/
 backend/.env.hosted
 desktop/build/
 desktop/dist/
+
+# ML outputs (datasets, trained artifacts before they're copied into backend/models)
+ml/out/

@@ -1,0 +1,6 @@
+# Training and publishing only (the app runs the trained models with NumPy, no ML libraries).
+# Install on top of backend/requirements.txt:  pip install -r backend/requirements.txt -r ml/requirements-ml.txt
+lightgbm>=4.5
+scikit-learn>=1.5
+matplotlib>=3.9
+huggingface_hub>=0.30
