@@ -597,16 +597,15 @@ It builds the frontend (served by the app itself), fetches the pinned llama.cpp 
 and both engine builds, headless), then the installer `desktop/dist/DoosraSetup-<version>.exe`.
 `python desktop/launcher.py` runs the app from source without building anything.
 
-To release, bump `VERSION` in `backend/version.py`, then push a matching tag:
+Releasing is part of merging. Bump `VERSION` in `backend/version.py` in your pull request; when it's
+merged to `main`, the Desktop app workflow sees a version that hasn't been released yet, builds the installer
+on Windows, runs the app's self-test, and publishes `app-v<version>` as a GitHub release, with notes that
+list the pull requests since the last one. Merges that don't change the version don't release anything.
 
-```bash
-git tag app-v2.5.0 && git push origin app-v2.5.0
-```
-
-The Desktop app workflow builds the installer on Windows and publishes it as a GitHub release;
-installed copies see it in Settings, download it (checked against the sha256 GitHub publishes)
-and update in place: the app closes, the installer runs silently and opens the new version. A
-manual run of the workflow builds the installer without releasing it.
+Installed copies see the release in Settings, download it (checked against the sha256 GitHub publishes)
+and update in place: the app closes, the installer runs silently and opens the new version. A tag pushed
+by hand (`git tag app-v2.5.0 && git push origin app-v2.5.0`) also releases, and a manual run of the
+workflow builds the installer without releasing it.
 
 ## Security notes
 
