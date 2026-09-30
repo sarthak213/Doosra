@@ -156,10 +156,12 @@ print(f"{per_step:.0f} s per step; a full run is ~{full_steps} steps = ~{per_ste
 FastModel.for_inference(model)
 for ex in data["test"].select(range(3)):
     msgs = ex["messages"][:2]
-    ids = tok.apply_chat_template(msgs, tools=TOOLS, add_generation_prompt=True, enable_thinking=False,
-                                  return_tensors="pt").to("cuda")
-    out = model.generate(input_ids=ids, max_new_tokens=160, do_sample=False)
-    print("Q:", msgs[1]["content"]); print(tok.decode(out[0][ids.shape[1]:], skip_special_tokens=False)[:400]); print()"""),
+    enc = tok.apply_chat_template(msgs, tools=TOOLS, add_generation_prompt=True, enable_thinking=False,
+                                  return_tensors="pt", return_dict=True).to("cuda")
+    out = model.generate(**enc, max_new_tokens=160, do_sample=False)
+    gold = [c["function"]["name"] + " " + c["function"]["arguments"] for c in ex["messages"][2]["tool_calls"]]
+    print("Q:", msgs[1]["content"]); print("gold:", gold)
+    print(tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=False)[:400]); print()"""),
 ("code", """# the adapter, then a Q4_K_M GGUF for Doosra's llama.cpp engine, both to Hugging Face
 model.push_to_hub(OUT_REPO, token=HF_TOKEN)
 tok.push_to_hub(OUT_REPO, token=HF_TOKEN)
