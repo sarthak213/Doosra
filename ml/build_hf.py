@@ -205,6 +205,29 @@ def build_toolcall_data() -> Path:
     return out
 
 
+TOOLCALL_SESSIONS = {
+    "b": "about 4 hours of A100 time over two sessions (about 20 s a step); the first session disconnected at step 195 "
+         "and training resumed from the step-150 checkpoint on Google Drive",
+}
+
+
+def build_toolcall_model(run: str) -> Path:
+    """The card and loss plot for a fine-tuned tool-calling model repo (the model files are already there, pushed
+    by the training notebook): ml/out/hf/toolcall-model-<run>/, published with `python ml/publish.py toolcall-<run>`."""
+    sys.path.insert(0, str(ROOT / "ml" / "hf" / "toolcall"))
+    import model_card
+    from huggingface_hub import hf_hub_download
+    repo = f"Sarthak213/doosra-qwen3.5-4b-toolcalls-{run}"
+    log = json.loads(Path(hf_hub_download(repo, "run_log.json", force_download=True)).read_text(encoding="utf-8"))
+    out = fresh(OUT / f"toolcall-model-{run}")
+    model_card.loss_plot(log, out / "training_loss.png")
+    evaluation = ROOT / "ml" / "hf" / "toolcall" / f"evaluation-{run}.md"      # written once ToolEval has results
+    (out / "README.md").write_text(model_card.card(
+        run, repo, log, evaluation.read_text(encoding="utf-8") if evaluation.exists() else None,
+        TOOLCALL_SESSIONS.get(run, f"{log.get('train_seconds', 0) / 3600:.1f} hours on the GPU")), encoding="utf-8")
+    return out
+
+
 def main() -> None:
     reports = {g: json.loads((REPORTS / g / "report.json").read_text(encoding="utf-8")) for g in ("T20", "ODI")}
     model = fresh(OUT / "winprob-model")
