@@ -51,7 +51,7 @@ print(RUN, CFG)"""),
 # kernels for Qwen3.5's linear-attention layers (without them transformers falls back to slow PyTorch code)
 !pip install -q --no-deps fla-core flash-linear-attention"""),
 ("code", """import os, json, time, platform
-ON_KAGGLE = os.path.exists("/kaggle")
+ON_KAGGLE = "KAGGLE_KERNEL_RUN_TYPE" in os.environ   # Colab images now have a /kaggle folder too
 WORK = "/kaggle/working" if ON_KAGGLE else "/content"
 if ON_KAGGLE:
     from kaggle_secrets import UserSecretsClient
