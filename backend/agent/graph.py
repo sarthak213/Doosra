@@ -53,7 +53,7 @@ from analytics.results import is_table, to_records
 from analytics.scope import FILTER_ALIASES, FILTER_ARGS
 
 from . import cancellation
-from .prompts import INSIGHT_RECIPE, build_system_prompt
+from .prompts import INSIGHT_RECIPE, build_compact_prompt, build_system_prompt
 
 TOOL_TIMEOUT_SECONDS = 30.0
 MAX_TOOL_ROUNDS = 8
@@ -81,7 +81,10 @@ THINKING_MODE = ("off" if _thinking_env in ("off", "0", "false", "no") else
 
 
 def thinking_for(deep: bool) -> bool:
-    """Whether this turn reasons: `deep` is True for saved chats, False for quick explanations."""
+    """Whether this turn reasons: `deep` is True for saved chats, False for quick explanations. Doosra's
+    fine-tuned model never does: it was trained to answer directly."""
+    if COMPACT:
+        return False
     return {"on": True, "off": False}.get(THINKING_MODE, deep)
 
 
@@ -92,14 +95,19 @@ _TURN_THINKING: contextvars.ContextVar[bool | None] = contextvars.ContextVar("tu
 PROVIDER = BASE_URL = MODEL = None
 LLM_TIMEOUT_SECONDS = 600.0
 LOCAL = False
+# Doosra's fine-tuned model (v3.0) learned the routing rules in training: it gets the short prompt and compact
+# tool list it was trained on (prompts.COMPACT_PROMPT, compact_tools), about half the tokens to read per question.
+COMPACT = False
 client: AsyncOpenAI | None = None
 
 
-def configure(provider: str | None = None, base_url: str | None = None, model: str | None = None) -> None:
+def configure(provider: str | None = None, base_url: str | None = None, model: str | None = None,
+              compact: bool = False) -> None:
     """Point the copilot at a model server. At import this reads the environment (LLM_PROVIDER,
     LLM_BASE_URL, LLM_MODEL...); the desktop app calls it again when its built-in engine starts or
     the user picks another engine in Settings, without a restart."""
-    global PROVIDER, BASE_URL, MODEL, LLM_TIMEOUT_SECONDS, LOCAL, client
+    global PROVIDER, BASE_URL, MODEL, LLM_TIMEOUT_SECONDS, LOCAL, COMPACT, client
+    COMPACT = compact
     PROVIDER = (provider or os.environ.get("LLM_PROVIDER", "groq")).lower()
     preset = _PROVIDER_PRESETS.get(PROVIDER, _PROVIDER_PRESETS["groq"])
     BASE_URL = base_url or (os.environ.get("LLM_BASE_URL") if provider is None else None) or preset["base_url"]
@@ -739,6 +747,8 @@ GRAPH = build_graph()
 def _system_prompt() -> str:
     """The fixed part: the same for every question on a given day."""
     cat = catalog.get_catalog()
+    if COMPACT:
+        return build_compact_prompt(date_min=cat.date_min, date_max=cat.date_max, today=dt.date.today().isoformat())
     prompt = build_system_prompt(date_min=cat.date_min, date_max=cat.date_max, today=dt.date.today().isoformat())
     if THINKING_MODE == "off":
         prompt += "\n/no_think"
@@ -784,6 +794,8 @@ async def _run_agent(question: str, history: list[dict] | None, request_id: str 
         notes = {n['title']: n['body'] for n in (project or {}).get('notes') or []}
         # The optional tool goes last, so the tool block reads the same up to it with or without a project.
         openai_tools = mcp_tools_to_openai(listed.tools) + LOCAL_TOOLS + [FINAL_ANSWER] + ([NOTE_TOOL] if notes else [])
+        if COMPACT:
+            openai_tools = compact_tools(openai_tools)
         schemas = {t["function"]["name"]: t["function"]["parameters"] for t in openai_tools}
         state: AgentState = {
             "messages": [{"role": "system", "content": system}, *_sanitize_history(history),
