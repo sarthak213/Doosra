@@ -16,7 +16,16 @@ export function DesktopProvider({ children }) {
     []
   );
   useEffect(() => { refresh(); }, [refresh]);
-  return <DesktopContext.Provider value={{ ...state, refresh }}>{children}</DesktopContext.Provider>;
+  // Is a newer Doosra out? Checked once at start (the server caches the answer for a few hours).
+  const [update, setUpdate] = useState(null);
+  const checkUpdate = useCallback(
+    (force = false) => apiGet("/api/desktop/update", force ? { force: true } : undefined).then(setUpdate, () => {}),
+    []
+  );
+  useEffect(() => { if (state.desktop) checkUpdate(); }, [state.desktop, checkUpdate]);
+  return (
+    <DesktopContext.Provider value={{ ...state, refresh, update, setUpdate, checkUpdate }}>{children}</DesktopContext.Provider>
+  );
 }
 
 export const formatBytes = (n) => {

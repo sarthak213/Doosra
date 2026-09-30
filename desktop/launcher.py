@@ -176,10 +176,12 @@ def self_test() -> int:
 
 def run_window(api: Api) -> None:
     import doosra_home
+    import updates
     import webview
 
-    webview.create_window(TITLE, api.url, width=1280, height=800, min_size=(960, 640), maximized=True,
-                          background_color="#0f1e16")
+    window = webview.create_window(TITLE, api.url, width=1280, height=800, min_size=(960, 640), maximized=True,
+                                   background_color="#0f1e16")
+    updates.quit_app = window.destroy          # "Restart to update" in Settings closes the app this way
     # A saved profile (not private mode), kept with the app's data, so the page's own storage survives restarts.
     webview.start(private_mode=False, storage_path=str(doosra_home.home() / "webview"))
 
@@ -216,6 +218,9 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         log.info("closing")
         api.stop()
+        import updates
+        if updates.run_pending_installer():
+            log.info("started the update installer")
     return 0
 
 

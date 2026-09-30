@@ -39,8 +39,7 @@ WizardImageFile=assets\wizard-large-164.bmp,assets\wizard-large-328.bmp
 WizardSmallImageFile=assets\wizard-small-55.bmp,assets\wizard-small-110.bmp
 Compression=lzma2/max
 SolidCompression=yes
-; The running app holds this mutex (desktop/launcher.py): setup and uninstall ask to close it first.
-AppMutex=DoosraDesktopApp
+; The running app holds the mutex DoosraDesktopApp (desktop/launcher.py): see InitializeSetup below.
 CloseApplications=yes
 RestartApplications=no
 
@@ -64,6 +63,8 @@ Name: "{autodesktop}\Doosra"; Filename: "{app}\Doosra.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\Doosra.exe"; Description: "{cm:LaunchProgram,Doosra}"; Flags: nowait postinstall skipifsilent
+; an update started from inside the app (/UPDATE=1) opens the new version when it's done
+Filename: "{app}\Doosra.exe"; Flags: nowait; Check: IsUpdate
 
 [Code]
 const
@@ -73,6 +74,56 @@ const
 
 var
   DownloadPage: TDownloadWizardPage;
+
+function IsUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:UPDATE|0}') = '1';
+end;
+
+// Doosra takes a few seconds to close fully (it unloads its .NET window last).
+function WaitForDoosraToClose(Seconds: Integer): Boolean;
+var
+  I: Integer;
+begin
+  I := 0;
+  while CheckForMutexes('DoosraDesktopApp') and (I < Seconds * 4) do
+  begin
+    Sleep(250);
+    I := I + 1;
+  end;
+  Result := not CheckForMutexes('DoosraDesktopApp');
+end;
+
+// Setup and uninstall need Doosra closed. Asked interactively; a silent run (an update from inside
+// the app, which has just closed itself) waits for it instead.
+function DoosraClosed(Silent: Boolean): Boolean;
+begin
+  if Silent then
+  begin
+    Result := WaitForDoosraToClose(120);
+    exit;
+  end;
+  Result := True;
+  while CheckForMutexes('DoosraDesktopApp') do
+  begin
+    if MsgBox('Doosra is open. Close it, then click OK to continue.', mbError, MB_OKCANCEL) = IDCANCEL then
+    begin
+      Result := False;
+      exit;
+    end;
+    WaitForDoosraToClose(20);
+  end;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  Result := DoosraClosed(WizardSilent or IsUpdate);
+end;
+
+function InitializeUninstall: Boolean;
+begin
+  Result := DoosraClosed(UninstallSilent);
+end;
 
 function HasWebView2: Boolean;
 var

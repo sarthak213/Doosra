@@ -20,6 +20,7 @@ import desktop_app
 import doosra_home
 import local_llm
 import setup_job
+import updates
 from version import VERSION
 from analytics import db
 from ingest import pull
@@ -157,3 +158,28 @@ def open_folder():
         raise HTTPException(status_code=400, detail="Only on Windows.")
     os.startfile(doosra_home.home())                        # noqa: S606 - our own data folder
     return {"status": "opened"}
+
+
+@router.get("/update", dependencies=[Local])
+async def update_status(force: bool = False):
+    """Is there a newer Doosra, and how far its download has got."""
+    info = await asyncio.to_thread(updates.check, force)
+    return {**info, "download": updates.DOWNLOAD.snapshot()}
+
+
+@router.post("/update/download", dependencies=[Local])
+def update_download():
+    try:
+        return updates.start_download().snapshot()
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+
+@router.post("/update/install", dependencies=[Local])
+def update_install():
+    """Close the app and run the downloaded installer; the new version opens when it's done."""
+    try:
+        updates.install_on_quit()
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return {"status": "closing"}

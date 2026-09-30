@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiGet, apiSend } from "../api.js";
 import Panel from "../components/kit/Panel.jsx";
@@ -10,11 +10,17 @@ const MODE_LABEL = { vulkan: "on the GPU", "vulkan-nocoopmat": "on the GPU (comp
 
 // The desktop app's settings: the AI engine and model, downloaded models, the cricket data.
 export default function Settings() {
-  const { status, refresh } = useDesktop();
+  const { status, refresh, update, setUpdate, checkUpdate } = useDesktop();
   const navigate = useNavigate();
   const [message, setMessage] = useState(null);
   const [dataCheck, setDataCheck] = useState(null);
   const [busy, setBusy] = useState(false);
+  const downloading = update?.download?.state === "downloading";
+  useEffect(() => {                      // follow an update's download
+    if (!downloading) return undefined;
+    const t = setInterval(() => apiGet("/api/desktop/update").then(setUpdate, () => {}), 1000);
+    return () => clearInterval(t);
+  }, [downloading, setUpdate]);
   if (!status) return <div className="view"><p className="muted">Loading…</p></div>;
   const s = status.settings;
   const eng = status.engine;
@@ -86,6 +92,13 @@ export default function Settings() {
         </ul>
       </Panel>
 
+      <Panel title="Updates" subtitle={`Doosra ${status.version}. New versions come from GitHub releases; your data and models are kept.`}>
+        <UpdatePanel update={update} busy={busy}
+          check={() => run(() => checkUpdate(true), null)}
+          download={() => run(async () => { await apiSend("/api/desktop/update/download"); await checkUpdate(); }, null)}
+          install={() => run(() => apiSend("/api/desktop/update/install"), "Closing Doosra to update. It opens again when the update is done.")} />
+      </Panel>
+
       <Panel title="Cricket data" subtitle="Ball-by-ball data from Cricsheet (ODC-By 1.0), rebuilt every week. Doosra checks for a newer build once a day.">
         <dl className="settings-list">
           <div><dt>Installed</dt><dd>{status.data ? `Built ${status.data.built_at?.slice(0, 10)}, matches up to ${status.data.latest_match}` : "Not installed"}</dd></div>
@@ -100,5 +113,38 @@ export default function Settings() {
         </div>
       </Panel>
     </div>
+  );
+}
+
+function UpdatePanel({ update, busy, check, download, install }) {
+  if (!update) return <p className="muted">Checking for updates…</p>;
+  const d = update.download || {};
+  const latest = update.latest;
+  return (
+    <>
+      <dl className="settings-list">
+        <div><dt>Latest</dt><dd>
+          {update.available ? `Doosra ${latest.version} is available (${formatBytes(latest.size)})`
+            : update.error ? update.error : "You have the latest version."}
+        </dd></div>
+        {d.state === "downloading" && (
+          <div><dt>Downloading</dt><dd>{formatBytes(d.done)}{d.total ? ` of ${formatBytes(d.total)}` : ""}</dd></div>
+        )}
+        {d.state === "error" && <div><dt>Download</dt><dd>{d.error}</dd></div>}
+      </dl>
+      {update.available && latest.notes && <p className="note-meta update-notes">{latest.notes}</p>}
+      <div className="setup-actions">
+        {update.available && d.state === "ready" && (
+          <button type="button" className="primary-btn" disabled={busy} onClick={install}>Restart to update</button>
+        )}
+        {update.available && d.state !== "ready" && (
+          <button type="button" className="primary-btn" disabled={busy || d.state === "downloading"} onClick={download}>
+            {d.state === "error" ? "Try the download again" : d.state === "downloading" ? "Downloading…" : "Download the update"}
+          </button>
+        )}
+        <button type="button" className="ghost-btn" disabled={busy} onClick={check}>Check now</button>
+        {latest?.page && <a className="ghost-btn" href={latest.page} target="_blank" rel="noreferrer">Release notes</a>}
+      </div>
+    </>
   );
 }
