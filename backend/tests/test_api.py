@@ -77,6 +77,11 @@ def test_options_and_metrics(client):
     assert {"true_sr", "match_factor"} <= ids
 
 
+def test_scoped_options(client):
+    r = client.get("/api/options/scoped", params={"competition": "Test Bash League"})
+    assert r.status_code == 200 and r.json()["venues"] == ["City Oval"] and r.json()["seasons"] == ["2023/24"]
+
+
 def test_fibs_endpoints(client):
     r = client.get("/api/fibs/report", params={"format": "T20", "gender": "male", "role": "bowling"})
     assert r.status_code == 200 and r.json()["findings"]

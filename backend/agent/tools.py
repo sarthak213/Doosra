@@ -124,7 +124,9 @@ def warm_caches() -> None:
 
 def invalidate_caches() -> None:
     """Call after re-ingesting the DB so the next lookup picks up fresh names."""
+    from analytics import facets
     catalog.invalidate()
+    facets.clear_cache()
 
 
 # Handed to the model in run_sql's description: the schema plus the traps

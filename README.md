@@ -64,6 +64,7 @@ backend/
 │   ├── components.py       #   the per-ball outcome taxonomy (FIBS)
 │   ├── fibs.py             #   the FIBS study: what's skill, what's luck
 │   ├── coverage.py         #   what the data covers and what it's missing
+│   ├── facets.py           #   dynamic filtering: which competitions/teams/venues/seasons exist in scope
 │   ├── registry.py         #   the metric registry: every metric declared once
 │   ├── insights.py         #   deterministic facts about a chart's data (for board explanations)
 │   ├── engine.py           #   query builder: stats, splits, form, arcs, percentiles, matrix...
@@ -193,6 +194,12 @@ python -m ingest.validate
 ```
 
 ## The views
+
+Every view shares one filter bar, and its suggestions are **dynamic**: they list only what exists
+within the filters already chosen. Pick ODI and the competitions are ODI tournaments; add the
+Men's ODI World Cup and 2023/24, and the venues, teams and seasons narrow to that tournament.
+Each list ignores its own choice, so you can still switch to another competition of the same
+format (`/api/options/scoped`, `analytics/facets.py`).
 
 - **Player Hub** (`/players/:name`) — batting/bowling summary with
   context-adjusted cards, a rolling-form chart against the career line (with

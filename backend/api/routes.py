@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from analytics import catalog, coverage, engine, registry
+from analytics import catalog, coverage, engine, facets, registry
 from analytics.scope import normalize_filters
 
 from .auth import current_user
@@ -75,6 +75,17 @@ def options():
         "dimensions": registry.DIMENSIONS,
         "coverage": {"from": cat.date_min, "to": cat.date_max},
     }
+
+
+@router.get("/options/scoped")
+def scoped_options(competition: str | None = None, format: str | None = None, gender: str | None = None,  # noqa: A002
+                   team: str | None = None, opposition: str | None = None, venue: str | None = None,
+                   season: str | None = None, from_year: int | None = None, to_year: int | None = None):
+    """Dynamic filtering: the competitions, teams, opposition, venues and seasons that exist within
+    the other filters chosen (ODI -> ODI competitions; the IPL -> its venues and seasons)."""
+    return facets.facets({"competition": competition, "format": format, "gender": gender, "team": team,
+                          "opposition": opposition, "venue": venue, "season": season,
+                          "from_year": from_year, "to_year": to_year})
 
 
 @router.get("/search")

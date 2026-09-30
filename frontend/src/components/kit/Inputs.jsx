@@ -8,6 +8,28 @@ export function useOptions() {
   return data;
 }
 
+// Dynamic filtering: the competitions, teams, venues and seasons that exist within the filters
+// already chosen (ODI -> ODI competitions; the IPL -> its venues and seasons). Until the first
+// answer arrives, the global lists stand in.
+const SCOPING = ["competition", "format", "gender", "team", "opposition", "venue", "season", "from_year", "to_year"];
+const scopedCache = new Map();
+export function useScopedOptions(filters) {
+  const params = Object.fromEntries(SCOPING.filter((k) => filters?.[k] != null && filters[k] !== "").map((k) => [k, filters[k]]));
+  const key = JSON.stringify(params);
+  const [data, setData] = useState(() => scopedCache.get(key) || null);
+  useEffect(() => {
+    if (scopedCache.has(key)) { setData(scopedCache.get(key)); return undefined; }
+    let alive = true;
+    const t = setTimeout(() => {
+      apiGet("/api/options/scoped", JSON.parse(key))
+        .then((d) => { scopedCache.set(key, d); if (alive) setData(d); })
+        .catch(() => {});
+    }, 120);
+    return () => { alive = false; clearTimeout(t); };
+  }, [key]);
+  return data;
+}
+
 let metricsPromise = null;
 export function useMetrics() {
   const { data } = useFetch(() => (metricsPromise ||= apiGet("/api/metrics")), "metrics");
@@ -30,8 +52,10 @@ export function CommitInput({ value, onCommit, placeholder, options, type = "tex
     if (!options?.length) return [];
     const q = String(draft).trim().toLowerCase();
     const hits = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
-    return hits.slice(0, 8);
+    return hits.slice(0, 50);
   }, [options, draft]);
+  const listRef = useRef(null);
+  useEffect(() => { listRef.current?.children[active]?.scrollIntoView({ block: "nearest" }); }, [active]);
   const pick = (o) => { setDraft(o); setOpen(false); commitValue(o); };
   const shown = open && matches.length > 0 && !(matches.length === 1 && matches[0] === draft);
   return (
@@ -49,7 +73,7 @@ export function CommitInput({ value, onCommit, placeholder, options, type = "tex
           } else if (e.key === "Escape") setOpen(false);
         }} />
       {shown && (
-        <ul className="autocomplete-list suggest-list" role="listbox">
+        <ul className="autocomplete-list suggest-list" role="listbox" ref={listRef}>
           {matches.map((o, i) => (
             <li key={o} role="option" aria-selected={i === active} className={i === active ? "active" : ""}
               onMouseDown={(e) => { e.preventDefault(); pick(o); }}>{o}</li>
@@ -80,9 +104,9 @@ const FIELDS = {
   format: { label: "Format", select: ["", "Test", "ODI", "T20I", "T20", "first-class", "List A", "international"] },
   gender: { label: "Gender", select: ["", "male", "female", "all"], names: { "": "auto" } },
   team: { label: "Team", options: "teams", placeholder: "any" },
-  opposition: { label: "Opposition", options: "teams", placeholder: "any" },
+  opposition: { label: "Opposition", options: "opposition", placeholder: "any" },
   venue: { label: "Venue", options: "venues", placeholder: "any" },
-  season: { label: "Season", placeholder: "e.g. 2024" },
+  season: { label: "Season", options: "seasons", placeholder: "e.g. 2024" },
   from_year: { label: "From", type: "number", placeholder: "year" },
   to_year: { label: "To", type: "number", placeholder: "year" },
   phase: { label: "Phase", select: ["", "powerplay", "middle", "death"], names: { "": "all" } },
@@ -113,7 +137,9 @@ export function filtersFor(role, filters) {
 // The shared filter bar. `show` limits which filters appear; with role="bowling" the batting-only
 // ones are hidden (and dropped from requests by filtersFor).
 export function FilterBar({ filters, onChange, show = Object.keys(FIELDS), role }) {
-  const options = useOptions();
+  const global = useOptions();
+  const scoped = useScopedOptions(filters);
+  const options = scoped || (global && { ...global, opposition: global.teams });
   const set = (key, v) => {
     const next = { ...filters };
     if (v === null || v === "" || v === undefined) delete next[key];
@@ -142,7 +168,7 @@ export function FilterBar({ filters, onChange, show = Object.keys(FIELDS), role 
               </select>
             ) : (
               <CommitInput value={filters?.[key]} onCommit={(v) => set(key, v)} placeholder={f.placeholder}
-                options={f.options ? options?.[f.options]?.slice(0, f.options === "competitions" ? 120 : undefined) : undefined}
+                options={f.options ? options?.[f.options] : undefined}
                 type={f.type} ariaLabel={f.label} />
             )}
           </label>
