@@ -53,30 +53,53 @@ def _describe(r: dict) -> str:
     return f"{ball}: {r['batter']} {r['runs_total']} off {r['bowler']}"
 
 
+def _over_text(balls: list[dict]) -> str:
+    runs = sum(b["runs_total"] for b in balls)
+    wkts = sum(1 for b in balls if b["is_wicket"])
+    bowlers = sorted({b["bowler"] for b in balls})
+    w = f", {wkts} wicket{'s' if wkts > 1 else ''}" if wkts else ""
+    return f"Over {balls[0]['over_num'] + 1} from {' and '.join(bowlers)}: {runs} run{'s' if runs != 1 else ''}{w}"
+
+
 def key_moments(rows: list[dict], team1: str, team2: str, n: int = 6) -> list[dict]:
-    """The wickets and boundaries that moved the win probability most (at least an over apart). Ordinary
-    balls are left out: the model moves a little on every ball, and a big move is only a story with an event."""
-    swings = []
+    """What moved the game most: single wickets and boundaries, and whole overs (a tight over at the death
+    can swing a chase more than any one ball). Largest swings first, then shown in match order; an over
+    and a ball inside it aren't both picked. Ordinary single balls are left out: the model moves a little
+    on every ball, and a big move is only a story with an event or an over behind it."""
+    candidates = []                                  # (size, delta, before_row, after_row, text, first_seq)
     for prev, cur in zip(rows, rows[1:]):
-        if not (cur["is_wicket"] or cur["runs_batter"] in (4, 6)) or cur["innings"] != prev["innings"]:
+        if cur["innings"] != prev["innings"]:
             continue                                                  # the change of innings isn't a moment
-        delta = cur["wp_team1"] - prev["wp_team1"]
-        swings.append((abs(delta), delta, prev, cur))
-    swings.sort(key=lambda s: -s[0])
+        if cur["is_wicket"] or cur["runs_batter"] in (4, 6):
+            d = cur["wp_team1"] - prev["wp_team1"]
+            candidates.append((abs(d), d, prev, cur, _describe(cur), cur["seq"]))
+    overs: dict[tuple, list] = {}
+    for r in rows:
+        overs.setdefault((r["innings"], r["over_num"]), []).append(r)
+    by_seq = {(r["innings"], r["seq"]): r for r in rows}
+    for (inn, _), balls in overs.items():
+        before = by_seq.get((inn, balls[0]["seq"] - 1))
+        if not before:
+            continue                                                  # the innings' first over has no "before"
+        d = balls[-1]["wp_team1"] - before["wp_team1"]
+        candidates.append((abs(d), d, before, balls[-1], _over_text(balls), balls[0]["seq"]))
+    candidates.sort(key=lambda c: -c[0])
     picked: list[tuple] = []
-    for size, delta, prev, cur in swings:
-        if size < 0.04 or len(picked) == n:
+    for c in candidates:
+        if c[0] < 0.05 or len(picked) == n:
             break
-        if any(p[3]["innings"] == cur["innings"] and abs(p[3]["seq"] - cur["seq"]) < 6 for p in picked):
-            continue
-        picked.append((size, delta, prev, cur))
+        span = (c[3]["innings"], c[5], c[3]["seq"])
+        if any(p[3]["innings"] == span[0] and not (span[2] < p[5] or span[1] > p[3]["seq"]) for p in picked):
+            continue                                                  # overlaps a moment already picked
+        picked.append(c)
     moments = []
-    for size, delta, prev, cur in sorted(picked, key=lambda s: (s[3]["innings"], s[3]["seq"])):
+    for size, delta, prev, cur, text, first in sorted(picked, key=lambda c: (c[3]["innings"], c[3]["seq"])):
         gainer = team1 if delta > 0 else team2
         before = prev["wp_team1"] if gainer == team1 else 1 - prev["wp_team1"]
         after = cur["wp_team1"] if gainer == team1 else 1 - cur["wp_team1"]
         moments.append({"innings": cur["innings"], "seq": cur["seq"], "over": cur["over_num"], "ball": cur["ball_in_over"],
-                        "text": _describe(cur), "team": gainer, "before": round(before, 3), "after": round(after, 3),
+                        "text": text, "kind": "over" if text.startswith("Over ") else "ball", "team": gainer,
+                        "before": round(before, 3), "after": round(after, 3),
                         "score": f"{cur['score']}/{cur['wickets']}", "batting_team": cur["batting_team"]})
     return moments
 
@@ -126,3 +149,42 @@ def replay(match_id: str) -> dict:
         "note": None if scored else "No win-probability model for this match (it needs 6-ball overs).",
         "rain": m["method"] == "D/L",
     }
+
+
+def match_story(team: str, opposition: str | None = None, date: str | None = None, **filters) -> dict:
+    """The copilot's view of a match: find it (the latest that fits, or the one on `date`), then its result,
+    how the win chance moved over by over, and the key moments as a table."""
+    from analytics.results import result
+
+    wanted = {**{k: v for k, v in filters.items() if v not in (None, "")}, "team": team}
+    if opposition:
+        wanted["opposition"] = opposition
+    found = list_matches(wanted, limit=40)["matches"]
+    if date:
+        found = [m for m in found if str(m["date"]).startswith(date)]
+    if not found:
+        return result(f"No limited-overs match found for {team}{' v ' + opposition if opposition else ''}",
+                      [], [], notes=["Match Replay covers T20 and ODI matches. Try a season, competition or date."])
+    m = found[0]
+    r = replay(m["match_id"])
+    moments = [[f"innings {x['innings']}, {x['over']}.{x['ball']}", x["text"].split(": ", 1)[-1], x["score"], x["team"],
+                round(100 * x["before"]), round(100 * x["after"])] for x in r["moments"]]
+    last_ball: dict[tuple, dict] = {}
+    for b in r["balls"]:                                   # the last ball of each over (extras make some overs longer)
+        last_ball[(b["innings"], b["over"])] = b
+    by_over: dict[int, list] = {}
+    for (inn, over), b in last_ball.items():
+        by_over.setdefault(inn, []).append([over + 1, round(100 * b["wp"])])
+    others = [f"{x['date']} ({x['summary']})" for x in found[1:6]]
+    notes = ["'Chance before/after' is the helped side's chance of winning, just before and after that ball. "
+             f"win_chance_by_over gives {r['match']['team1']}'s chance at the end of each over. From Doosra's "
+             "win-probability model (trained on earlier matches only), not the bookmakers."]
+    if others:
+        notes.append("Other matches that fit (pass date=YYYY-MM-DD for one of them): " + "; ".join(others))
+    if r.get("rain"):
+        notes.append("Rain-affected (DLS): the chase uses the revised target.")
+    title = (f"{r['match']['team1']} v {r['match']['team2']}, {r['match'].get('event_name') or r['match']['match_type']}, "
+             f"{str(r['match']['date'])[:10]}: {r['match']['summary']}")
+    return result(title, ["Ball", "Moment", "Score", "Helped", "Chance before %", "Chance after %"], moments,
+                  notes=notes, innings=r["innings"], win_chance_by_over={"team": r["match"]["team1"], **by_over},
+                  match_id=m["match_id"], replay_link=f"/matches/{m['match_id']}")

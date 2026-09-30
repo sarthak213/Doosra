@@ -40,6 +40,7 @@ hidden = (collect_submodules("uvicorn") + collect_submodules("webview")
 
 datas = [
     (str(BACKEND / "models.json"), "."),
+    (str(BACKEND / "models"), "models"),                      # the win-probability models (JSON)
     (str(DIST), "frontend/dist"),
     (str(ENGINE), "engine"),
     (str(ROOT / "desktop" / "assets" / "doosra.ico"), "assets"),

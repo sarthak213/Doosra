@@ -266,3 +266,77 @@ export function PercentileBars({ metrics, players, values, labels }) {
     </div>
   );
 }
+
+// Match Replay's win-probability worm: team1's chance of winning after every ball, both innings on one
+// over axis. Wickets are dots on the line; key moments are numbered markers that match the list beside
+// the chart. One series, one y scale (0-100%), 50% dashed; hover shows the ball and both sides' chances.
+export function WinProbChart({ balls, overs, team1, team2, moments = [], height = 340, activeMoment, onMoment }) {
+  if (!balls?.length) return null;
+  const momentAt = new Map(moments.map((m, i) => [`${m.innings}-${m.seq}`, i + 1]));
+  const data = balls.map((b) => ({
+    ...b,
+    x: (b.innings - 1) * overs + b.legal / 6,
+    pct: Math.round(b.wp * 1000) / 10,
+    moment: momentAt.get(`${b.innings}-${b.seq}`),
+  }));
+  const ticks = [];
+  const step = overs >= 40 ? 10 : 5;
+  for (let t = 0; t <= 2 * overs; t += step) ticks.push(t);
+  const tickLabel = (v) => (v === overs ? "" : String(v > overs ? v - overs : v));
+  const Dot = ({ cx, cy, payload }) => {
+    if (cx == null || cy == null) return null;
+    if (payload.moment) {
+      const on = activeMoment === payload.moment;
+      return (
+        <g key={`m-${payload.innings}-${payload.seq}`} style={{ cursor: onMoment ? "pointer" : undefined }}
+          onClick={() => onMoment?.(payload.moment)}>
+          <circle cx={cx} cy={cy} r={on ? 11 : 9} fill={on ? SERIES[1] : "#1c3024"} stroke={SERIES[1]} strokeWidth={2} />
+          <text x={cx} y={cy} dy={4} textAnchor="middle" fill={on ? "#0f1e16" : INK} fontSize={10.5}
+            fontFamily="IBM Plex Mono" fontWeight={600}>{payload.moment}</text>
+        </g>
+      );
+    }
+    if (payload.wicket) {
+      return <circle key={`w-${payload.innings}-${payload.seq}`} cx={cx} cy={cy} r={4} fill={INK} stroke="#16281d" strokeWidth={2} />;
+    }
+    return null;
+  };
+  const Tip = ({ active, payload }) => {
+    if (!active || !payload?.length) return null;
+    const b = payload[0].payload;
+    return (
+      <div style={TOOLTIP.contentStyle}>
+        <div style={{ marginBottom: 4 }}>{b.batting_team} {b.score}/{b.wickets}</div>
+        <div style={{ color: AXIS_TEXT, marginBottom: 6 }}>{b.text}</div>
+        <div>{team1} {b.pct.toFixed(0)}% · {team2} {(100 - b.pct).toFixed(0)}%</div>
+      </div>
+    );
+  };
+  return (
+    <div className="chart-block">
+      <ul className="chart-legend">
+        <li><span className="legend-swatch" style={{ background: SERIES[0] }} aria-hidden="true" />{team1}'s chance of winning</li>
+        <li><span className="legend-dot" aria-hidden="true" />wicket</li>
+        {moments.length > 0 && <li><span className="legend-moment" aria-hidden="true">1</span>key moment</li>}
+      </ul>
+      <ChartArea height={height}>
+        <LineChart data={data} margin={{ top: 16, right: 24, left: 4, bottom: 14 }}>
+          <CartesianGrid stroke={GRID} vertical={false} />
+          <XAxis dataKey="x" type="number" domain={[0, 2 * overs]} ticks={ticks} tickFormatter={tickLabel} stroke={AXIS_TEXT}
+            tick={TICK} tickLine={false}
+            label={{ value: "Overs (first innings, then the chase)", position: "insideBottom", offset: -8, fill: AXIS_TEXT, fontSize: 11 }} />
+          <YAxis domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} tickFormatter={(v) => `${v}%`} stroke={AXIS_TEXT} tick={TICK}
+            tickLine={false} axisLine={false} width={48} />
+          <ReferenceLine y={50} stroke="rgba(241,232,214,0.35)" strokeDasharray="4 4" />
+          <ReferenceLine x={overs} stroke="rgba(241,232,214,0.35)"
+            label={{ value: "innings break", position: "insideTopLeft", fill: AXIS_TEXT, fontSize: 11 }} />
+          <ReferenceLine y={96} stroke="none" label={{ value: `▲ ${team1} ahead`, position: "insideLeft", fill: AXIS_TEXT, fontSize: 11 }} />
+          <ReferenceLine y={4} stroke="none" label={{ value: `▼ ${team2} ahead`, position: "insideLeft", fill: AXIS_TEXT, fontSize: 11 }} />
+          <Tooltip content={<Tip />} cursor={{ stroke: "rgba(241,232,214,0.25)" }} />
+          <Line type="linear" dataKey="pct" stroke={SERIES[0]} strokeWidth={2} dot={<Dot />} activeDot={{ r: 5 }}
+            isAnimationActive={false} />
+        </LineChart>
+      </ChartArea>
+    </div>
+  );
+}

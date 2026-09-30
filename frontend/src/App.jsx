@@ -13,6 +13,8 @@ import DataCoverage from "./views/DataCoverage.jsx";
 import Home from "./views/Home.jsx";
 import Invites from "./views/Invites.jsx";
 import Login from "./views/Login.jsx";
+import MatchReplay from "./views/MatchReplay.jsx";
+import Matches from "./views/Matches.jsx";
 import Methodology from "./views/Methodology.jsx";
 import PlayerHub from "./views/PlayerHub.jsx";
 import PlayerMatrix from "./views/PlayerMatrix.jsx";
@@ -45,6 +47,8 @@ function Shell() {
           <Route path="/compare" element={<CompareStudio />} />
           <Route path="/query" element={<QueryBuilder />} />
           <Route path="/matrix" element={<PlayerMatrix />} />
+          <Route path="/matches" element={<Matches />} />
+          <Route path="/matches/:matchId" element={<MatchReplay />} />
           <Route element={<WorkspaceLayout />}>
             <Route path="/ask/:chatId?" element={<AskView />} />
             <Route path="/projects/:projectId" element={<ProjectPage />} />

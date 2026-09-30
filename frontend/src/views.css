@@ -1704,3 +1704,31 @@ a.primary-btn, a.ghost-btn { text-decoration: none; }
 .update-notes { white-space: pre-wrap; max-height: 180px; overflow: auto; font-size: 13px; }
 @media (max-width: 640px) { .setup-pc { grid-template-columns: 1fr; } }
 .setup-option p.note-meta, .setup-card > p.note-meta { display: block; line-height: 1.5; }
+
+/* Match Replay */
+.featured-matches { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin: 4px 0 18px; }
+.featured-match { display: flex; flex-direction: column; gap: 3px; padding: 12px 14px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--pitch-raised); color: var(--cream); text-decoration: none; }
+.featured-match:hover { border-color: var(--brass-dim); }
+.match-list td:first-child { white-space: nowrap; }
+.match-list td:nth-child(4) { min-width: 140px; }
+.replay-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.replay-score { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--pitch-raised); }
+.replay-score strong { font-size: 18px; color: var(--cream); }
+.replay-score.result strong { font-size: 15px; }
+.replay-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: stretch; }
+.moments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 400px; overflow-y: auto; }
+.moments button { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--cream); cursor: pointer; font: inherit; }
+.moments li.on button, .moments button:hover { border-color: #3987e5; }
+.moments strong { display: block; font-size: 13px; font-weight: 500; }
+.moments .note-meta { display: block; margin-top: 2px; }
+.moment-no { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 2px solid #3987e5; display: grid; place-items: center;
+  font-family: var(--font-mono, "IBM Plex Mono"); font-size: 11px; font-weight: 600; }
+.moments li.on .moment-no { background: #3987e5; color: var(--pitch); }
+.legend-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--cream); margin-right: 6px; }
+.legend-moment { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; border: 2px solid #3987e5;
+  font-size: 9px; margin-right: 6px; }
+.replay-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap: 16px; }
+@media (max-width: 900px) { .replay-grid { grid-template-columns: 1fr; } }
