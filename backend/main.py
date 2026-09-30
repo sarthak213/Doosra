@@ -35,14 +35,19 @@ from pydantic import BaseModel
 load_dotenv()  # reads .env in the working directory, if present
 
 from agent import cancellation, tools  # noqa: E402
+from agent import graph  # noqa: E402
 from agent.graph import run_agent  # noqa: E402
 from analytics import db  # noqa: E402
 from analytics.catalog import ResolutionError  # noqa: E402
 from ingest import pull, refresh  # noqa: E402
 from api import board_context, workspace  # noqa: E402
+import desktop_app  # noqa: E402
+import local_llm  # noqa: E402
+import setup_job  # noqa: E402
 from api import auth  # noqa: E402
 from api.auth import current_user  # noqa: E402
 from api.auth_routes import router as auth_router  # noqa: E402
+from api.setup_routes import router as setup_router  # noqa: E402
 from api import chat_persist  # noqa: E402
 from api.chat_persist import Recorder, history_for_model  # noqa: E402
 from api.routes import router as api_router  # noqa: E402
@@ -67,11 +72,21 @@ async def lifespan(app: FastAPI):
     auth.check_config()
     tools.warm_caches()
     refresh.start()            # a hosted instance follows the published database (DATA_REFRESH_HOURS)
-    if serves_ui():            # the MCP endpoint has no sign-in and shares the root path with the app, so it's off here
-        yield
-    else:
-        async with mcp.session_manager.run():
+    # The desktop app: bring up the engine chosen in setup (in the background; the window opens at once).
+    if desktop_app.enabled():
+        setup_job.apply_on_startup()
+    # Or a model given directly (a dev run of the built-in engine).
+    elif graph.PROVIDER == "llamacpp" and os.environ.get("DOOSRA_MODEL"):
+        local_llm.start_in_background(Path(os.environ["DOOSRA_MODEL"]), os.environ.get("DOOSRA_ENGINE_MODE"),
+                                      on_ready=lambda e: graph.configure("llamacpp", base_url=e.base_url))
+    try:
+        if serves_ui():        # the MCP endpoint has no sign-in and shares the root path with the app, so it's off here
             yield
+        else:
+            async with mcp.session_manager.run():
+                yield
+    finally:
+        local_llm.ENGINE.stop()
 
 
 app = FastAPI(title="Doosra API", lifespan=lifespan)
@@ -87,6 +102,7 @@ app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_methods=["
 app.add_middleware(SessionMiddleware, secret_key=auth.session_secret(), same_site="lax", max_age=14 * 24 * 3600,
                    https_only=os.environ.get("PUBLIC_URL", "").startswith("https://"))
 app.include_router(auth_router)
+app.include_router(setup_router)
 app.include_router(api_router)
 app.include_router(workspace_router)
 
@@ -245,11 +261,16 @@ class SPAStaticFiles(StaticFiles):
 
     async def get_response(self, path: str, scope):
         try:
-            return await super().get_response(path, scope)
+            response = await super().get_response(path, scope)
         except StarletteHTTPException as e:
             if e.status_code != 404 or path.replace(os.sep, "/").split("/")[0] in ("api", "auth", "query", "mcp"):
                 raise
-            return await super().get_response("index.html", scope)
+            response = await super().get_response("index.html", scope)
+        # The page itself is always re-checked, so an update is picked up at once; the hashed
+        # assets it points to never change under the same name, so they can be cached.
+        if response.media_type == "text/html" or path in ("", ".", "index.html"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 _dist = Path(os.environ.get("FRONTEND_DIST") or Path(__file__).resolve().parent.parent / "frontend" / "dist")

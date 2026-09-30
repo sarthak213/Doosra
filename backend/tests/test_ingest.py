@@ -154,6 +154,19 @@ def test_build_info(built):
     assert json.loads(stored["rows"])["matches"] == 2
 
 
+def test_build_info_can_be_read_while_the_api_has_the_database_open(built, monkeypatch):
+    # The desktop app's status check reads build_info while requests are querying the same file.
+    from analytics import db
+    from ingest import pull
+    out, _ = built
+    monkeypatch.setattr(db, "DB_PATH", out)
+    con = db.connect()
+    try:
+        assert pull.local_info(out)["latest_match_date"] == "2025-02-01"
+    finally:
+        con.close()
+
+
 def test_incremental_upsert_replaces_matches(built, tmp_path):
     out, _ = built
     revised = json.loads(json.dumps(DLS))
@@ -293,11 +306,10 @@ def test_manifest_and_pull_round_trip(analysed, tmp_path, monkeypatch):
     assert doc["rows"]["matches"] == 2 and doc["latest_match"] == "2025-02-01"
     (tmp_path / "manifest.json").write_text(json.dumps(doc), encoding="utf-8")
 
-    # A fake release whose asset "urls" are local files.
+    # A fake release whose asset urls are local files, fetched by the real (resumable, checksummed) downloader.
     release = {"tag_name": "data-latest", "assets": [
-        {"name": n, "browser_download_url": str(tmp_path / n)} for n in ("manifest.json", asset.name)]}
+        {"name": n, "browser_download_url": (tmp_path / n).as_uri()} for n in ("manifest.json", asset.name)]}
     monkeypatch.setattr(pull, "latest_release", lambda: release)
-    monkeypatch.setattr(pull, "download", lambda url, dest: dest.write_bytes(Path(url).read_bytes()))
 
     target = tmp_path / "app" / "cricket.duckdb"
     target.parent.mkdir()
@@ -320,12 +332,11 @@ def test_pull_rejects_a_corrupt_download(analysed, tmp_path, monkeypatch):
     doc = manifest.make_manifest(analysed, asset)
     doc["asset"]["sha256"] = "0" * 64
     (tmp_path / "manifest.json").write_text(json.dumps(doc), encoding="utf-8")
-    release = {"assets": [{"name": n, "browser_download_url": str(tmp_path / n)}
+    release = {"assets": [{"name": n, "browser_download_url": (tmp_path / n).as_uri()}
                           for n in ("manifest.json", asset.name)]}
     monkeypatch.setattr(pull, "latest_release", lambda: release)
-    monkeypatch.setattr(pull, "download", lambda url, dest: dest.write_bytes(Path(url).read_bytes()))
     target = tmp_path / "app" / "cricket.duckdb"
     target.parent.mkdir()
-    with pytest.raises(pull.PullError, match="sha256"):
+    with pytest.raises(pull.PullError, match="checksum"):
         pull.pull(target=target)
     assert not target.exists()

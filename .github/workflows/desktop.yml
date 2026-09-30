@@ -1,0 +1,88 @@
+name: Desktop app
+
+# Builds DoosraSetup-<version>.exe on Windows. A tag app-v<version> (matching backend/version.py)
+# publishes it as a GitHub release, which the installed app offers as an update; a manual run
+# just builds it and keeps the installer as a workflow artifact.
+#
+#   git tag app-v2.4.0 && git push origin app-v2.4.0
+
+on:
+  push:
+    tags: ["app-v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          v=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' backend/version.py)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/app-v* && "${GITHUB_REF#refs/tags/app-v}" != "$v" ]]; then
+            echo "::error::Tag ${GITHUB_REF#refs/tags/} doesn't match backend/version.py ($v)"; exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r backend/requirements.txt pyinstaller pywebview
+
+      # The pinned llama.cpp builds (desktop/fetch_engine.py checks their sha256)
+      - uses: actions/cache@v4
+        with:
+          path: desktop/build/engine
+          key: llama-${{ hashFiles('desktop/fetch_engine.py') }}
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      # frontend, engine, Doosra.exe, its --self-test, then the installer
+      - run: python desktop/build.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DoosraSetup-${{ steps.version.outputs.version }}
+          path: desktop/dist/DoosraSetup-${{ steps.version.outputs.version }}.exe
+          if-no-files-found: error
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/app-v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cat > notes.md <<EOF
+          Doosra $VERSION for Windows 10 and 11 (64-bit).
+
+          Download **DoosraSetup-$VERSION.exe** and run it. It installs for your user, with no admin
+          prompt. On first launch Doosra downloads the cricket database (about 430 MB) and an AI model
+          (2.7 or 5.6 GB) once; everything then runs on your PC.
+
+          The installer isn't code-signed yet, so Windows SmartScreen may say it "protected your PC":
+          click **More info**, then **Run anyway**.
+
+          Already installed? Doosra offers this update in Settings.
+          EOF
+          gh release create "app-v$VERSION" "desktop/dist/DoosraSetup-$VERSION.exe" \
+            --title "Doosra $VERSION" --notes-file notes.md --target "$GITHUB_SHA" --latest

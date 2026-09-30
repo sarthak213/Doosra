@@ -1,0 +1,29 @@
+{
+  "_comment": "Models the desktop app can download. Files are pinned by sha256 (from the Hugging Face repo's file list); both are Apache-2.0 Qwen weights, packaged as GGUF by LM Studio's community repo. Bump file and sha256 together.",
+  "models": [
+    {
+      "id": "qwen3.5-9b",
+      "label": "Qwen3.5 9B",
+      "quant": "Q4_K_M",
+      "repo": "lmstudio-community/Qwen3.5-9B-GGUF",
+      "file": "Qwen3.5-9B-Q4_K_M.gguf",
+      "size_bytes": 5627044256,
+      "sha256": "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
+      "min_ram_gb": 16,
+      "note": "The best answers. Needs 16 GB of memory; a GPU makes it much faster.",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "qwen3.5-4b",
+      "label": "Qwen3.5 4B",
+      "quant": "Q4_K_M",
+      "repo": "lmstudio-community/Qwen3.5-4B-GGUF",
+      "file": "Qwen3.5-4B-Q4_K_M.gguf",
+      "size_bytes": 2710000000,
+      "sha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
+      "min_ram_gb": 8,
+      "note": "Faster and lighter, for PCs with less memory. Picks tools less reliably.",
+      "license": "Apache-2.0"
+    }
+  ]
+}

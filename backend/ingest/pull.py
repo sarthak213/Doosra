@@ -30,11 +30,13 @@ from pathlib import Path
 import duckdb
 from tqdm import tqdm
 
+import doosra_home
+import downloads
 from ingest.build_db import SCHEMA_VERSION, sha256
 
 REPO = os.environ.get("DOOSRA_DATA_REPO", "sarthak213/Doosra")
 TAG = "data-latest"
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = doosra_home.data_dir()
 TARGET = DATA_DIR / "cricket.duckdb"
 
 
@@ -67,13 +69,26 @@ def _asset_url(release: dict, name: str) -> str:
     raise PullError(f"release {release.get('tag_name')} has no {name}")
 
 
-def download(url: str, dest: Path):
-    with _request(url, accept="application/octet-stream") as r, open(dest, "wb") as fh:
-        total = int(r.headers.get("Content-Length") or 0) or None
-        with tqdm(total=total, unit="B", unit_scale=True, desc=dest.name) as bar:
-            for chunk in iter(lambda: r.read(1 << 20), b""):
-                fh.write(chunk)
-                bar.update(len(chunk))
+def download(url: str, dest: Path, sha256: str | None = None, progress=None, cancel=None):
+    """Fetch a release file, resuming after a dropped connection (see downloads.py). Without a
+    `progress` callback (the command line) a progress bar is printed."""
+    bar = None
+    if progress is None:
+        bar = tqdm(unit="B", unit_scale=True, desc=dest.name)
+
+        def progress(done, total):
+            bar.total = total
+            bar.n = done
+            bar.refresh()
+    try:
+        downloads.download(url, dest, sha256=sha256, progress=progress, cancel=cancel)
+    except downloads.Cancelled:
+        raise
+    except downloads.DownloadError as e:
+        raise PullError(str(e)) from e
+    finally:
+        if bar:
+            bar.close()
 
 
 def _zstd_open(path: Path):
@@ -95,7 +110,9 @@ def local_info(path: Path = TARGET) -> dict | None:
     if not path.exists():
         return None
     try:
-        con = duckdb.connect(str(path), read_only=True)
+        # the API's own settings (analytics.db.connect): DuckDB refuses a second connection to an open file
+        # with different ones, and this runs while requests are reading the same database
+        con = duckdb.connect(str(path), read_only=True, config={"enable_external_access": False})
     except duckdb.Error:
         return None
     try:
@@ -129,12 +146,28 @@ def check_database(path: Path):
                         f"{SCHEMA_VERSION} -- update the code (git pull) first")
 
 
-def pull(check_only: bool = False, force: bool = False, target: Path = TARGET) -> int:
+def published() -> dict:
+    """What the latest data release holds (its manifest), without downloading the database."""
+    release = latest_release()
+    work = TARGET.parent / ".download"
+    work.mkdir(parents=True, exist_ok=True)
+    path = work / "manifest.json"
+    path.unlink(missing_ok=True)
+    download(_asset_url(release, "manifest.json"), path, progress=lambda d, t: None)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def pull(check_only: bool = False, force: bool = False, target: Path = TARGET,
+         progress=None, cancel=None, stage=None) -> int:
+    """`progress(done, total)` follows the download and `stage(name)` the steps after it
+    ("verifying", "unpacking", "installing"); both are for the desktop app's setup screen."""
+    stage = stage or (lambda name: None)
     release = latest_release()
     work = target.parent / ".download"
     work.mkdir(parents=True, exist_ok=True)
     manifest_path = work / "manifest.json"
-    download(_asset_url(release, "manifest.json"), manifest_path)
+    manifest_path.unlink(missing_ok=True)                  # always the current one
+    download(_asset_url(release, "manifest.json"), manifest_path, progress=lambda d, t: None)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     have = local_info(target) or {}
@@ -150,18 +183,24 @@ def pull(check_only: bool = False, force: bool = False, target: Path = TARGET) -
         return 0
 
     asset = work / manifest["asset"]["name"]
-    download(_asset_url(release, manifest["asset"]["name"]), asset)
-    if sha256(asset) != manifest["asset"]["sha256"]:
-        raise PullError("download corrupted (sha256 mismatch) -- try again")
+    stage("downloading")
+    # Resumes an interrupted download of the same build; the checksum is checked before it's used.
+    download(_asset_url(release, manifest["asset"]["name"]), asset, sha256=manifest["asset"]["sha256"],
+             progress=progress, cancel=cancel)
     fresh = work / "cricket.duckdb"
     print("Decompressing...")
+    stage("unpacking")
     decompress(asset, fresh)
+    stage("verifying")
     if sha256(fresh) != manifest["database"]["sha256"]:
         raise PullError("decompressed database doesn't match the manifest -- try again")
     check_database(fresh)
+    stage("installing")
     install(fresh, target)
     try:
-        download(_asset_url(release, "DATA_NOTICE.md"), target.parent / "DATA_NOTICE.md")
+        notice = target.parent / "DATA_NOTICE.md"
+        notice.unlink(missing_ok=True)
+        download(_asset_url(release, "DATA_NOTICE.md"), notice, progress=lambda d, t: None)
     except PullError:
         pass
     asset.unlink(missing_ok=True)

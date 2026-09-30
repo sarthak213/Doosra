@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { API_BASE } from "../api.js";
+import { useDesktop } from "../desktop/DesktopProvider.jsx";
 import UserMenu from "./UserMenu.jsx";
 import Wordmark from "./Wordmark.jsx";
 
@@ -20,6 +21,7 @@ const NAV = [
 ];
 
 export default function Masthead() {
+  const { desktop, update } = useDesktop();
   const [stats, setStats] = useState(null);
 
   useEffect(() => {
@@ -53,6 +55,12 @@ export default function Masthead() {
         </div>
       </dl>
       <UserMenu />
+      {desktop && (
+        <NavLink to="/settings" className="masthead-settings" aria-label={update?.available ? "Settings: an update is available" : "Settings"}
+          title={update?.available ? `Doosra ${update.latest.version} is available` : "Settings"}>
+          ⚙{update?.available && <span className="masthead-dot" aria-hidden="true" />}
+        </NavLink>
+      )}
     </header>
   );
 }

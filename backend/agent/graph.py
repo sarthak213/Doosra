@@ -68,14 +68,10 @@ _PROVIDER_PRESETS = {
              "api_key_env": "GROQ_API_KEY", "timeout": 60.0},
     "ollama": {"base_url": "http://localhost:11434/v1", "model": "qwen3:14b", "api_key_env": None, "timeout": 600.0},
     "lmstudio": {"base_url": "http://localhost:1234/v1", "model": "local-model", "api_key_env": None, "timeout": 600.0},
+    # The desktop app's built-in llama.cpp server (local_llm.py); its port is chosen at start-up.
+    "llamacpp": {"base_url": "http://127.0.0.1:8093/v1", "model": "local", "api_key_env": None, "timeout": 600.0},
 }
-
-_provider = os.environ.get("LLM_PROVIDER", "groq").lower()
-_preset = _PROVIDER_PRESETS.get(_provider, _PROVIDER_PRESETS["groq"])
-
-BASE_URL = os.environ.get("LLM_BASE_URL", _preset["base_url"])
-MODEL = os.environ.get("LLM_MODEL", _preset["model"])
-LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", _preset["timeout"]))
+LOCAL_PROVIDERS = ("lmstudio", "ollama", "llamacpp")
 # Reasoning ("thinking") mode. "auto" (the default): a quick explanation from the copilot drawer or a
 # page's Explain button answers without reasoning; a saved chat (the Ask tab, a project, a board
 # explanation) reasons first -- slower, more careful. "on"/"off" force it either way.
@@ -92,13 +88,32 @@ def thinking_for(deep: bool) -> bool:
 # The current turn's reasoning choice, read by _complete (a context variable, so concurrent answers
 # don't see each other's).
 _TURN_THINKING: contextvars.ContextVar[bool | None] = contextvars.ContextVar("turn_thinking", default=None)
-_api_key_env = _preset["api_key_env"]
-_api_key = os.environ.get(_api_key_env, "unset") if _api_key_env else "not-needed"
 
-# A local model gets a long wait and no retry: a retry makes it re-read a multi-minute prompt from the
-# start, which doubles the wait and can crash the engine. A hosted API gets one retry for blips.
-LOCAL = _provider in ("lmstudio", "ollama") or "localhost" in BASE_URL or "host.docker.internal" in BASE_URL
-client = AsyncOpenAI(base_url=BASE_URL, api_key=_api_key, timeout=LLM_TIMEOUT_SECONDS, max_retries=0 if LOCAL else 1)
+PROVIDER = BASE_URL = MODEL = None
+LLM_TIMEOUT_SECONDS = 600.0
+LOCAL = False
+client: AsyncOpenAI | None = None
+
+
+def configure(provider: str | None = None, base_url: str | None = None, model: str | None = None) -> None:
+    """Point the copilot at a model server. At import this reads the environment (LLM_PROVIDER,
+    LLM_BASE_URL, LLM_MODEL...); the desktop app calls it again when its built-in engine starts or
+    the user picks another engine in Settings, without a restart."""
+    global PROVIDER, BASE_URL, MODEL, LLM_TIMEOUT_SECONDS, LOCAL, client
+    PROVIDER = (provider or os.environ.get("LLM_PROVIDER", "groq")).lower()
+    preset = _PROVIDER_PRESETS.get(PROVIDER, _PROVIDER_PRESETS["groq"])
+    BASE_URL = base_url or (os.environ.get("LLM_BASE_URL") if provider is None else None) or preset["base_url"]
+    MODEL = model or (os.environ.get("LLM_MODEL") if provider is None else None) or preset["model"]
+    LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", preset["timeout"]))
+    key_env = preset["api_key_env"]
+    api_key = os.environ.get(key_env, "unset") if key_env else "not-needed"
+    # A local model gets a long wait and no retry: a retry makes it re-read a multi-minute prompt from
+    # the start, which doubles the wait and can crash the engine. A hosted API gets one retry for blips.
+    LOCAL = PROVIDER in LOCAL_PROVIDERS or any(h in BASE_URL for h in ("localhost", "127.0.0.1", "host.docker.internal"))
+    client = AsyncOpenAI(base_url=BASE_URL, api_key=api_key, timeout=LLM_TIMEOUT_SECONDS, max_retries=0 if LOCAL else 1)
+
+
+configure()
 
 
 # ---------------------------------------------------------------------------

@@ -4,14 +4,46 @@ A cricket analytics workbench: player hubs, comparisons, a query builder and
 a player matrix over ball-by-ball data, with context-adjusted metrics (true
 strike rate, match factor, era factor...) and an AI copilot that can explain
 any view or drive the app, plus an Ask workspace of saved chats, projects with
-your own notes, and boards of charts the AI can explain. It runs locally or as
-an invite-only hosted container. Every analytics capability is also an MCP tool, so
+your own notes, and boards of charts the AI can explain. It installs as a
+Windows app with its own AI model, runs from source, or runs as an invite-only
+hosted container. Every analytics capability is also an MCP tool, so
 any MCP-capable app (Claude Desktop and others) can use it directly.
 
 Data: [Cricsheet](https://cricsheet.org/) ball-by-ball data and register,
 under the [ODC-By 1.0](https://opendatacommons.org/licenses/by/1-0/) licence
 (see [DATA_NOTICE.md](DATA_NOTICE.md)). Rebuilt weekly by GitHub Actions and
 published as a release the app downloads.
+
+## Install (Windows)
+
+1. Download **DoosraSetup-&lt;version&gt;.exe** from the
+   [latest release](https://github.com/sarthak213/Doosra/releases/latest) and run it. It installs
+   for your user (no admin prompt) with Start menu and desktop shortcuts. The installer isn't
+   code-signed yet, so SmartScreen may say it "protected your PC": click **More info**, then
+   **Run anyway**.
+2. The first launch opens a setup screen. It shows your PC's memory, GPU and free space,
+   recommends a model, and downloads once:
+   - the cricket database (about 430 MB);
+   - an AI model: **Qwen3.5 9B** (5.6 GB, the best answers; for 16 GB+ of memory, faster with a
+     GPU) or **Qwen3.5 4B** (2.7 GB, for smaller PCs). If LM Studio already has the same file,
+     Doosra can use that copy instead (after checking its checksum).
+
+   Downloads can be stopped and resumed. Then Doosra starts its built-in AI engine, checks it
+   answers, and opens.
+
+Everything runs on your PC; questions never leave it. The AI engine is
+[llama.cpp](https://github.com/ggml-org/llama.cpp), shipped inside the app: it uses the GPU
+through Vulkan (Intel Arc, AMD, NVIDIA) and falls back to the CPU. Settings (the ⚙ in the
+masthead) switches models, GPU or CPU, and how much a conversation can hold, or uses a running
+LM Studio instead. The cricket data updates itself once a day when a new weekly build is out,
+and new versions of the app are offered in Settings (the ⚙ gets a red dot).
+
+| | |
+| --- | --- |
+| Needs | Windows 10 (1809+) or 11, 64-bit; 8 GB of memory (16 GB+ for the 9B model); about 7 GB free |
+| App | `%LOCALAPPDATA%\Programs\Doosra` |
+| Your data | `%LOCALAPPDATA%\Doosra`: the database, models, chats and projects, settings, logs |
+| Uninstall | Settings → Apps → Doosra. It asks whether to delete your data too (kept by default). |
 
 ## Architecture
 
@@ -32,6 +64,7 @@ backend/
 │   ├── components.py       #   the per-ball outcome taxonomy (FIBS)
 │   ├── fibs.py             #   the FIBS study: what's skill, what's luck
 │   ├── coverage.py         #   what the data covers and what it's missing
+│   ├── facets.py           #   dynamic filtering: which competitions/teams/venues/seasons exist in scope
 │   ├── registry.py         #   the metric registry: every metric declared once
 │   ├── insights.py         #   deterministic facts about a chart's data (for board explanations)
 │   ├── engine.py           #   query builder: stats, splits, form, arcs, percentiles, matrix...
@@ -57,6 +90,19 @@ backend/
 └── main.py                 # FastAPI app: /api, /mcp, SSE chat streams, the built frontend when hosted
 
 Dockerfile                  # the hosted image: API + built React app on one origin
+
+backend/desktop_app.py      # the desktop app: settings, hardware check, model registry (models.json)
+backend/local_llm.py        # the built-in AI engine: llama-server as a child process, GPU -> CPU fallback
+backend/setup_job.py        # first-run setup: database, model, engine start, test answer (resumable)
+backend/updates.py          # app updates from GitHub releases
+backend/doosra_home.py      # where app data lives (backend/data in a checkout, %LOCALAPPDATA%\Doosra installed)
+desktop/                    # the Windows app
+├── launcher.py             #   Doosra.exe: the API in-process + a native window (pywebview, WebView2)
+├── doosra.spec             #   PyInstaller build
+├── installer.iss           #   Inno Setup installer (DoosraSetup-<version>.exe)
+├── fetch_engine.py         #   the pinned llama.cpp release (sha256-checked)
+├── make_icon.py            #   the icon and installer images, from frontend/public/favicon.svg
+└── build.py                #   all of the above in one command
 
 frontend/                   # React app: Player Hub, Compare, Query, Matrix, FIBS, Data, Ask workspace + copilot drawer
 ```
@@ -148,6 +194,12 @@ python -m ingest.validate
 ```
 
 ## The views
+
+Every view shares one filter bar, and its suggestions are **dynamic**: they list only what exists
+within the filters already chosen. Pick ODI and the competitions are ODI tournaments; add the
+Men's ODI World Cup and 2023/24, and the venues, teams and seasons narrow to that tournament.
+Each list ignores its own choice, so you can still switch to another competition of the same
+format (`/api/options/scoped`, `analytics/facets.py`).
 
 - **Player Hub** (`/players/:name`) — batting/bowling summary with
   context-adjusted cards, a rolling-form chart against the career line (with
@@ -376,7 +428,7 @@ Any app that speaks the Model Context Protocol can use the same 21 tools. The
 server offers two transports:
 
 | Transport | Endpoint | Needs the API running? | Use when |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **stdio** | the client launches `python -m mcp_server` itself | No | Simplest; the client manages the process |
 | **HTTP** (streamable) | `http://localhost:8000/mcp` | Yes (`uvicorn main:app --port 8000`) | You already run the app, or several clients should share one server |
 
@@ -503,6 +555,29 @@ the analytics queries run over a database of roughly 700 MB.
 GitHub Pages can't host this: it serves static files only, and Doosra needs
 the API and a database. (A landing page there is possible.) The CI `container`
 job builds the image and smoke-tests it on every push.
+
+## Building the Windows app
+
+```bash
+pip install -r backend/requirements.txt pyinstaller pywebview
+python desktop/build.py            # needs Node and Inno Setup 6 (winget install JRSoftware.InnoSetup)
+```
+
+It builds the frontend (served by the app itself), fetches the pinned llama.cpp builds, builds
+`desktop/dist/Doosra/Doosra.exe` with PyInstaller, runs its `--self-test` (the API, the app page
+and both engine builds, headless), then the installer `desktop/dist/DoosraSetup-<version>.exe`.
+`python desktop/launcher.py` runs the app from source without building anything.
+
+To release, bump `VERSION` in `backend/version.py`, then push a matching tag:
+
+```bash
+git tag app-v2.4.0 && git push origin app-v2.4.0
+```
+
+The Desktop app workflow builds the installer on Windows and publishes it as a GitHub release;
+installed copies see it in Settings, download it (checked against the sha256 GitHub publishes)
+and update in place: the app closes, the installer runs silently and opens the new version. A
+manual run of the workflow builds the installer without releasing it.
 
 ## Security notes
 

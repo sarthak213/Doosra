@@ -10,7 +10,10 @@ from pathlib import Path
 
 import duckdb
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cricket.duckdb"
+import doosra_home
+
+# backend/data in a checkout; %LOCALAPPDATA%\Doosra in the desktop app; DOOSRA_HOME overrides.
+DB_PATH = doosra_home.data_dir() / "cricket.duckdb"
 
 
 def connect():
