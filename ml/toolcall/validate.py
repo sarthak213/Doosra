@@ -52,12 +52,28 @@ def check(rows: list[dict], tools: set[str]) -> list[str]:
     return problems
 
 
+def _values(obj):
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from _values(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _values(v)
+    elif isinstance(obj, str):
+        yield obj
+
+
 def leaks(rows: list[dict], held: set[str]) -> list[str]:
+    """Held-out entities in what an example is about: an argument equal to one, or the name in the question
+    as a whole name ('Nepal', not 'Nepal Premier League'). Answers can name anyone in the results."""
+    import re
     out = []
     for r in rows:
-        text = r["question"] + " " + " ".join(a["tool_calls"][0]["function"]["arguments"]
-                                              for a in r["messages"] if a.get("tool_calls"))
-        hit = [h for h in held if h in text]
+        args = set()
+        for a in r["messages"]:
+            if a.get("tool_calls") and a["tool_calls"][0]["function"]["name"] != "final_answer":
+                args |= set(_values(json.loads(a["tool_calls"][0]["function"]["arguments"])))
+        hit = [h for h in held if h in args or re.search(rf"{re.escape(h)}(?!\s+[A-Z])", r["question"])]
         if hit:
             out.append(f"{r['id']}: held-out {hit[:2]}")
     return out

@@ -25,20 +25,20 @@ Exports a GGUF (Q4_K_M) that Doosra's built-in llama.cpp engine runs, and pushes
 2. **Secret:** add your Hugging Face write token as a secret named `HF_TOKEN`. Kaggle: *Add-ons → Secrets*.
    Colab: the key icon in the left bar, with notebook access on.
 3. **Configuration:** set `RUN` in the next cell: `"A"` on Kaggle, `"B"` on Colab, so the two runs compare
-   two configurations.
+   two configurations (LoRA rank 16 at a higher learning rate vs rank 32 at a lower one; 2 epochs each).
 4. *Run all.* Checkpoints are saved as training goes, so if a session drops, run all again and it resumes."""),
 ("code", """RUN = "A"            # "A" (Kaggle) or "B" (Colab)
 SMOKE = False        # True: a few steps on a few examples, to check the notebook end to end (~10 minutes)
 
 CONFIGS = {
     "A": dict(lora_r=16, lora_alpha=16, learning_rate=2e-4, epochs=2),
-    "B": dict(lora_r=32, lora_alpha=32, learning_rate=1e-4, epochs=3),
+    "B": dict(lora_r=32, lora_alpha=32, learning_rate=1e-4, epochs=2),
 }
 CFG = CONFIGS[RUN]
 BASE = "unsloth/Qwen3.5-4B"
 DATASET = "Sarthak213/doosra-toolcalls"
 OUT_REPO = f"Sarthak213/doosra-qwen3.5-4b-toolcalls-{RUN.lower()}"
-MAX_SEQ = 4096
+MAX_SEQ = 6144       # conversations run to ~5.4k tokens with the tool list
 print(RUN, CFG)"""),
 ("code", """%%capture
 !pip install -q unsloth
@@ -93,7 +93,7 @@ print(train[0]["text"][-1500:])"""),
 from unsloth.chat_templates import train_on_responses_only
 args = SFTConfig(
     output_dir=f"{WORK}/checkpoints-{RUN}", dataset_text_field="text", max_seq_length=MAX_SEQ,
-    per_device_train_batch_size=2, gradient_accumulation_steps=8, num_train_epochs=CFG["epochs"],
+    per_device_train_batch_size=1, gradient_accumulation_steps=16, num_train_epochs=CFG["epochs"],
     max_steps=6 if SMOKE else -1, learning_rate=CFG["learning_rate"], lr_scheduler_type="cosine", warmup_ratio=0.03,
     logging_steps=5, eval_strategy="steps", eval_steps=3 if SMOKE else 100, save_strategy="steps",
     save_steps=3 if SMOKE else 100, save_total_limit=2, optim="adamw_8bit", weight_decay=0.01, fp16=True,

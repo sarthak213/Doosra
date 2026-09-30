@@ -47,6 +47,7 @@ TARGETS = {
     "winprob": ("doosra-win-probability", "model", OUT / "hf" / "winprob-model"),
     "winprob-space": ("doosra-win-probability", "space", OUT / "hf" / "winprob-space"),
     "ball-outcome": ("doosra-ball-outcome", "model", OUT / "hf" / "ball-outcome-model"),
+    "toolcall-data": ("doosra-toolcalls", "dataset", OUT / "hf" / "toolcall-data"),
 }
 
 

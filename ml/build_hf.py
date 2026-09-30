@@ -174,6 +174,26 @@ def build_ball_outcome() -> Path:
     return out
 
 
+def build_toolcall_data() -> Path:
+    """The tool-calling dataset repo: the three splits, the tool list and system prompt, and the card."""
+    src, out = ROOT / "ml" / "out" / "toolcall", fresh(OUT / "toolcall-data")
+    for f in ("train.jsonl", "validation.jsonl", "test.jsonl", "tools.json", "system_prompt.txt"):
+        shutil.copy(src / f, out / f)
+    counts = {s: len((src / f"{s}.jsonl").read_text(encoding="utf-8").splitlines()) for s in ("train", "validation", "test")}
+    intents, para = {}, 0
+    for s in counts:
+        for line in (src / f"{s}.jsonl").read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            intents[r["intent"]] = intents.get(r["intent"], 0) + 1
+            para += "original_question" in r
+    card = (ROOT / "ml" / "hf" / "toolcall" / "dataset_card.md").read_text(encoding="utf-8")
+    (out / "README.md").write_text(card.format(
+        total=sum(counts.values()), **counts, paraphrased_share=para / sum(counts.values()),
+        intent_rows="\n".join(f"| {k} | {v:,} |" for k, v in sorted(intents.items(), key=lambda kv: -kv[1]))),
+        encoding="utf-8")
+    return out
+
+
 def main() -> None:
     reports = {g: json.loads((REPORTS / g / "report.json").read_text(encoding="utf-8")) for g in ("T20", "ODI")}
     model = fresh(OUT / "winprob-model")
