@@ -30,7 +30,9 @@ Exports a GGUF (Q4_K_M) that Doosra's built-in llama.cpp engine runs, and pushes
 ("code", """import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"   # one GPU: Kaggle's second T4 would split the model and slow it down
 RUN = "A"            # "A" (Kaggle) or "B" (Colab)
-SMOKE = False        # True: a few steps on a few examples, to check the notebook end to end (~10 minutes)
+SMOKE = False        # True: a few steps on a few examples, to check the notebook end to end (~20 minutes)
+TRAIN_EXAMPLES = 1600  # a shuffled subset: at ~3 min per 16 examples on a T4 (float32), 2 epochs of 1,600 is ~10 h
+HOURS = 10.5         # stop training (and save) after this, leaving time for the GGUF export in a 12-hour session
 
 CONFIGS = {
     "A": dict(lora_r=16, lora_alpha=16, learning_rate=2e-4, epochs=2),
@@ -44,7 +46,9 @@ MAX_SEQ = 6144       # conversations run to ~5.4k tokens with the tool list
 print(RUN, CFG)"""),
 ("code", """%%capture
 !pip install -q unsloth
-!pip install -q --upgrade "datasets>=3" "huggingface_hub>=0.30\""""),
+!pip install -q --upgrade "datasets>=3" "huggingface_hub>=0.30"
+# kernels for Qwen3.5's linear-attention layers (without them transformers falls back to slow PyTorch code)
+!pip install -q --no-deps fla-core flash-linear-attention"""),
 ("code", """import os, json, time, platform
 ON_KAGGLE = os.path.exists("/kaggle")
 WORK = "/kaggle/working" if ON_KAGGLE else "/content"
@@ -64,9 +68,10 @@ RUN_LOG = {"run": RUN, "platform": "Kaggle" if ON_KAGGLE else "Colab", "gpu": to
 from huggingface_hub import hf_hub_download
 data = load_dataset(DATASET)
 TOOLS = json.load(open(hf_hub_download(DATASET, "tools.json", repo_type="dataset")))
+data["train"] = data["train"].shuffle(seed=3407).select(range(min(TRAIN_EXAMPLES, len(data["train"]))))
 N_TRAIN = len(data["train"])
 if SMOKE:
-    data["train"], data["validation"] = data["train"].select(range(64)), data["validation"].select(range(16))
+    data["train"], data["validation"] = data["train"].select(range(64)), data["validation"].select(range(8))
 print(data)"""),
 ("code", """from unsloth import FastModel
 model, tokenizer = FastModel.from_pretrained(BASE, max_seq_length=MAX_SEQ, load_in_4bit=True, full_finetuning=False)
@@ -74,7 +79,12 @@ model = FastModel.get_peft_model(
     model, finetune_vision_layers=False, finetune_language_layers=True, finetune_attention_modules=True,
     finetune_mlp_modules=True, r=CFG["lora_r"], lora_alpha=CFG["lora_alpha"], lora_dropout=0, bias="none",
     use_gradient_checkpointing="unsloth", random_state=3407)
-tok = getattr(tokenizer, "tokenizer", tokenizer)   # the text tokenizer inside a vision-language processor"""),
+tok = getattr(tokenizer, "tokenizer", tokenizer)   # the text tokenizer inside a vision-language processor
+try:
+    import fla
+    print("linear-attention kernels: fla", fla.__version__)
+except Exception as e:
+    print("linear-attention kernels unavailable:", e)"""),
 ("code", """def render(example):
     \"\"\"The conversation in Qwen's chat format, with the tool list, as the app will send it (thinking off).\"\"\"
     msgs = []
@@ -88,34 +98,46 @@ tok = getattr(tokenizer, "tokenizer", tokenizer)   # the text tokenizer inside a
     return {"text": text}
 
 train = data["train"].map(render, remove_columns=data["train"].column_names)
-valid = data["validation"].select(range(min(100, len(data["validation"])))).map(
+valid = data["validation"].select(range(min(50, len(data["validation"])))).map(
     render, remove_columns=data["validation"].column_names)
 lengths = [len(tok(t)["input_ids"]) for t in train.select(range(min(300, len(train))))["text"]]
 print("tokens per example: median", sorted(lengths)[len(lengths) // 2], "max", max(lengths))
 print(train[0]["text"][-1500:])"""),
 ("code", """from trl import SFTTrainer, SFTConfig
+from transformers import TrainerCallback
 from unsloth.chat_templates import train_on_responses_only
+
+class TimeBudget(TrainerCallback):
+    \"\"\"Save and stop once HOURS of training have passed, so a long run still exports within the session.\"\"\"
+    def on_step_end(self, args, state, control, **kw):
+        if time.time() - T_START > HOURS * 3600:
+            RUN_LOG["events"].append(f"stopped by the time budget at step {state.global_step}")
+            control.should_save, control.should_training_stop = True, True
+
 args = SFTConfig(
     output_dir=f"{WORK}/checkpoints-{RUN}", dataset_text_field="text", max_seq_length=MAX_SEQ,
-    per_device_train_batch_size=1, gradient_accumulation_steps=16, num_train_epochs=CFG["epochs"],
-    max_steps=6 if SMOKE else -1, learning_rate=CFG["learning_rate"], lr_scheduler_type="cosine", warmup_ratio=0.03,
-    logging_steps=5, eval_strategy="steps", eval_steps=3 if SMOKE else 200, save_strategy="steps",
-    save_steps=3 if SMOKE else 100, save_total_limit=2, optim="adamw_8bit", weight_decay=0.01, fp16=True,
-    report_to="none", seed=3407)
-trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=train, eval_dataset=valid, args=args)
+    per_device_train_batch_size=1, per_device_eval_batch_size=1,   # eval at batch 8 ran out of memory
+    gradient_accumulation_steps=16, num_train_epochs=CFG["epochs"],
+    max_steps=4 if SMOKE else -1, learning_rate=CFG["learning_rate"], lr_scheduler_type="cosine", warmup_steps=5,
+    logging_steps=1 if SMOKE else 5, eval_strategy="steps", eval_steps=2 if SMOKE else 50, save_strategy="steps",
+    save_steps=2 if SMOKE else 25, save_total_limit=2, optim="adamw_8bit", weight_decay=0.01, fp16=True,
+    prediction_loss_only=True, report_to="none", seed=3407)
+trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=train, eval_dataset=valid, args=args,
+                     callbacks=[TimeBudget()])
 # learn only the assistant's turns (tool calls and answers), not the prompt, question or tool results
 trainer = train_on_responses_only(trainer, instruction_part="<|im_start|>user\\n",
                                   response_part="<|im_start|>assistant\\n")"""),
 ("code", """import glob
 resume = bool(glob.glob(f"{WORK}/checkpoints-{RUN}/checkpoint-*"))
-t0 = time.time()
+T_START = time.time()
 stats = trainer.train(resume_from_checkpoint=resume)
-RUN_LOG["train_seconds"] = round(time.time() - t0)
+RUN_LOG["train_seconds"] = round(time.time() - T_START)
 RUN_LOG["resumed"] = resume
 RUN_LOG["log_history"] = trainer.state.log_history
 RUN_LOG["metrics"] = stats.metrics
-print(stats.metrics)
-per_step = RUN_LOG["train_seconds"] / max(trainer.state.global_step, 1)
+RUN_LOG["peak_memory_gb"] = round(torch.cuda.max_memory_reserved() / 1e9, 1)
+print(stats.metrics, "| peak GPU memory GB:", RUN_LOG["peak_memory_gb"])
+per_step = stats.metrics["train_runtime"] / max(trainer.state.global_step, 1)
 full_steps = N_TRAIN * CFG["epochs"] // 16 if SMOKE else trainer.state.global_step
 print(f"{per_step:.0f} s per step; a full run is ~{full_steps} steps = ~{per_step * full_steps / 3600:.1f} hours")"""),
 ("code", """# three held-out questions, answered by the fine-tuned model with the app's tool list
