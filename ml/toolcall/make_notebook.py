@@ -27,7 +27,9 @@ Exports a GGUF (Q4_K_M) that Doosra's built-in llama.cpp engine runs, and pushes
 3. **Configuration:** set `RUN` in the next cell: `"A"` on Kaggle, `"B"` on Colab, so the two runs compare
    two configurations (LoRA rank 16 at a higher learning rate vs rank 32 at a lower one; 2 epochs each).
 4. *Run all.* Checkpoints are saved as training goes, so if a session drops, run all again and it resumes."""),
-("code", """RUN = "A"            # "A" (Kaggle) or "B" (Colab)
+("code", """import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"   # one GPU: Kaggle's second T4 would split the model and slow it down
+RUN = "A"            # "A" (Kaggle) or "B" (Colab)
 SMOKE = False        # True: a few steps on a few examples, to check the notebook end to end (~10 minutes)
 
 CONFIGS = {
@@ -70,7 +72,7 @@ model, tokenizer = FastModel.from_pretrained(BASE, max_seq_length=MAX_SEQ, load_
 model = FastModel.get_peft_model(
     model, finetune_vision_layers=False, finetune_language_layers=True, finetune_attention_modules=True,
     finetune_mlp_modules=True, r=CFG["lora_r"], lora_alpha=CFG["lora_alpha"], lora_dropout=0, bias="none",
-    random_state=3407)
+    use_gradient_checkpointing="unsloth", random_state=3407)
 tok = getattr(tokenizer, "tokenizer", tokenizer)   # the text tokenizer inside a vision-language processor"""),
 ("code", """def render(example):
     \"\"\"The conversation in Qwen's chat format, with the tool list, as the app will send it (thinking off).\"\"\"
@@ -85,7 +87,8 @@ tok = getattr(tokenizer, "tokenizer", tokenizer)   # the text tokenizer inside a
     return {"text": text}
 
 train = data["train"].map(render, remove_columns=data["train"].column_names)
-valid = data["validation"].map(render, remove_columns=data["validation"].column_names)
+valid = data["validation"].select(range(min(100, len(data["validation"])))).map(
+    render, remove_columns=data["validation"].column_names)
 lengths = [len(tok(t)["input_ids"]) for t in train.select(range(min(300, len(train))))["text"]]
 print("tokens per example: median", sorted(lengths)[len(lengths) // 2], "max", max(lengths))
 print(train[0]["text"][-1500:])"""),
@@ -95,7 +98,7 @@ args = SFTConfig(
     output_dir=f"{WORK}/checkpoints-{RUN}", dataset_text_field="text", max_seq_length=MAX_SEQ,
     per_device_train_batch_size=1, gradient_accumulation_steps=16, num_train_epochs=CFG["epochs"],
     max_steps=6 if SMOKE else -1, learning_rate=CFG["learning_rate"], lr_scheduler_type="cosine", warmup_ratio=0.03,
-    logging_steps=5, eval_strategy="steps", eval_steps=3 if SMOKE else 100, save_strategy="steps",
+    logging_steps=5, eval_strategy="steps", eval_steps=3 if SMOKE else 200, save_strategy="steps",
     save_steps=3 if SMOKE else 100, save_total_limit=2, optim="adamw_8bit", weight_decay=0.01, fp16=True,
     report_to="none", seed=3407)
 trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=train, eval_dataset=valid, args=args)
@@ -110,7 +113,10 @@ RUN_LOG["train_seconds"] = round(time.time() - t0)
 RUN_LOG["resumed"] = resume
 RUN_LOG["log_history"] = trainer.state.log_history
 RUN_LOG["metrics"] = stats.metrics
-print(stats.metrics)"""),
+print(stats.metrics)
+per_step = RUN_LOG["train_seconds"] / max(trainer.state.global_step, 1)
+full_steps = len(data["train"]) * CFG["epochs"] // 16 if SMOKE else trainer.state.global_step
+print(f"{per_step:.0f} s per step; a full run is ~{full_steps} steps = ~{per_step * full_steps / 3600:.1f} hours")"""),
 ("code", """# three held-out questions, answered by the fine-tuned model with the app's tool list
 FastModel.for_inference(model)
 for ex in data["test"].select(range(3)):
