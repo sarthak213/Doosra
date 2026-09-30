@@ -242,14 +242,15 @@ class TreeModel:
 
 
 class LinearModel:
-    """A standardised logistic regression: log-odds = coef . (x - mean) / scale + intercept (NaN -> 0)."""
+    """A standardised logistic regression: log-odds = coef . (x - mean) / scale + intercept. A missing value
+    counts as the training average (so it adds nothing either way)."""
 
     def __init__(self, spec: dict):
         self.mean, self.scale = np.asarray(spec["mean"]), np.asarray(spec["scale"])
         self.coef, self.intercept = np.asarray(spec["coef"]), float(spec["intercept"])
 
     def logit(self, X: np.ndarray) -> np.ndarray:
-        return ((np.nan_to_num(X) - self.mean) / self.scale) @ self.coef + self.intercept
+        return ((np.where(np.isnan(X), self.mean, X) - self.mean) / self.scale) @ self.coef + self.intercept
 
 
 class WinProbModel:

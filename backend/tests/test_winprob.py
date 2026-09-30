@@ -79,3 +79,23 @@ class TestModel:
 
     def test_not_a_limited_overs_match(self):
         assert winprob.predict_match("no-such-match") is None
+
+
+@pytest.mark.skipif(not winprob.load("T20"), reason="no trained T20 model in backend/models")
+def test_the_published_predictor_agrees_with_the_app():
+    # ml/hf/winprob/predict.py ships to Hugging Face on its own; it must give the app's numbers
+    import importlib.util
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("hf_predict", root / "ml" / "hf" / "winprob" / "predict.py")
+    hf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hf)
+    assert hf.FEATURES == winprob.FEATURES
+    published = hf.WinProbability(winprob.MODELS / "winprob-t20.json")
+    rng = np.random.default_rng(1)
+    X = np.column_stack([rng.integers(1, 3, 500), rng.integers(0, 121, 500), rng.integers(1, 11, 500),
+                         rng.integers(0, 230, 500), rng.integers(100, 240, 500), rng.integers(-5, 150, 500),
+                         rng.uniform(0, 20, 500), rng.uniform(130, 190, 500), rng.integers(0, 2, 500),
+                         np.full(500, 20), rng.uniform(-300, 300, 500)]).astype(float)
+    X[X[:, 0] == 1, 4:7] = np.nan                                  # no target in the first innings
+    assert np.allclose(published.predict_rows(X), winprob.load("T20").predict(X))

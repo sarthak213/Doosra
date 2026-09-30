@@ -9,6 +9,8 @@ then, from the repository root:
 
     python ml/publish.py dataset                 # ml/out/dataset -> <you>/doosra-cricket
     python ml/publish.py dataset --dry-run       # show what would be uploaded, and where
+    python ml/publish.py winprob                 # ml/out/hf/winprob-model -> <you>/doosra-win-probability
+    python ml/publish.py winprob-space           # ml/out/hf/winprob-space -> spaces/<you>/doosra-win-probability
 
 Everything published is public. Repos are created if they don't exist; uploads replace the
 files they name and leave the rest.
@@ -26,6 +28,8 @@ OUT = ROOT / "out"
 TARGETS = {
     # name: (repo suffix, repo type, local folder)
     "dataset": ("doosra-cricket", "dataset", OUT / "dataset"),
+    "winprob": ("doosra-win-probability", "model", OUT / "hf" / "winprob-model"),
+    "winprob-space": ("doosra-win-probability", "space", OUT / "hf" / "winprob-space"),
 }
 
 
@@ -49,8 +53,8 @@ def publish(target: str, dry_run: bool = False) -> str:
     repo_id = f"{user}/{suffix}"
     readme = folder / "README.md"
     text = readme.read_text(encoding="utf-8")
-    if "{repo_id}" in text and not dry_run:      # the card names its own repo in its code snippets
-        readme.write_text(text.replace("{repo_id}", repo_id), encoding="utf-8")
+    if ("{repo_id}" in text or "{user}" in text) and not dry_run:     # cards name their own and sibling repos
+        readme.write_text(text.replace("{repo_id}", repo_id).replace("{user}", user), encoding="utf-8")
     files = sorted(p for p in folder.rglob("*") if p.is_file())
     print(f"{repo_type} {repo_id}: {len(files)} files, {sum(p.stat().st_size for p in files) / 1e6:.0f} MB")
     for p in files:
@@ -60,7 +64,8 @@ def publish(target: str, dry_run: bool = False) -> str:
     from huggingface_hub import HfApi
 
     api = HfApi()
-    api.create_repo(repo_id, repo_type=repo_type, exist_ok=True)
+    api.create_repo(repo_id, repo_type=repo_type, exist_ok=True,
+                    **({"space_sdk": "gradio"} if repo_type == "space" else {}))
     api.upload_folder(repo_id=repo_id, repo_type=repo_type, folder_path=str(folder),
                       commit_message=f"Publish {target} from Doosra")
     kind = {"dataset": "datasets/", "space": "spaces/"}.get(repo_type, "")

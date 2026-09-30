@@ -108,8 +108,10 @@ def train_innings(inn: int, X: np.ndarray, y: np.ndarray, train, valid, test) ->
     booster = lgb.train(params, lgb.Dataset(Xs[tr], y[tr], feature_name=names), num_boost_round=4000,
                         valid_sets=[lgb.Dataset(Xs[va], y[va], feature_name=names)],
                         callbacks=[lgb.early_stopping(80, verbose=False)])
-    scaler = StandardScaler().fit(np.nan_to_num(Xs[tr]))
-    lr = LogisticRegression(max_iter=1000).fit(scaler.transform(np.nan_to_num(Xs[tr])), y[tr])
+    means = np.nanmean(Xs[tr], axis=0)
+    filled = np.where(np.isnan(Xs[tr]), means, Xs[tr])        # a missing value counts as the training average
+    scaler = StandardScaler().fit(filled)
+    lr = LogisticRegression(max_iter=1000).fit(scaler.transform(filled), y[tr])
     print(f"  innings {inn}: {booster.best_iteration} trees + logistic regression ({time.time() - t:.0f}s)")
     spec = {"features": names, "trees": booster.dump_model(num_iteration=booster.best_iteration),
             "linear": {"mean": scaler.mean_.tolist(), "scale": scaler.scale_.tolist(),
