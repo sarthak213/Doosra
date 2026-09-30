@@ -23,7 +23,8 @@ Exports a GGUF (Q4_K_M) that Doosra's built-in llama.cpp engine runs, and pushes
 1. **GPU:** Kaggle: *Settings → Accelerator → GPU T4 x2* (one is used) and *Internet on*.
    Colab: *Runtime → Change runtime type → T4 GPU*.
 2. **Secret:** add your Hugging Face write token as a secret named `HF_TOKEN`. Kaggle: *Add-ons → Secrets*.
-   Colab: the key icon in the left bar, with notebook access on.
+   Colab: the key icon in the left bar, with notebook access on. Colab also asks to connect Google Drive, where
+   checkpoints are kept so a disconnected run resumes.
 3. **Configuration:** set `RUN` in the next cell: `"A"` on Kaggle, `"B"` on Colab, so the two runs compare
    two configurations (LoRA rank 16 at a higher learning rate vs rank 32 at a lower one; 2 epochs each).
 4. *Run all.* Checkpoints are saved as training goes, so if a session drops, run all again and it resumes."""),
@@ -56,8 +57,11 @@ if ON_KAGGLE:
     from kaggle_secrets import UserSecretsClient
     HF_TOKEN = UserSecretsClient().get_secret("HF_TOKEN")
 else:
-    from google.colab import userdata
+    from google.colab import userdata, drive
     HF_TOKEN = userdata.get("HF_TOKEN")
+    drive.mount("/content/drive")              # checkpoints on Drive survive a disconnect, so a rerun resumes
+    WORK = "/content/drive/MyDrive/doosra-train"
+    os.makedirs(WORK, exist_ok=True)
 os.environ["HF_TOKEN"] = HF_TOKEN
 import torch
 print("platform:", "Kaggle" if ON_KAGGLE else "Colab", "| GPU:", torch.cuda.get_device_name(0),
