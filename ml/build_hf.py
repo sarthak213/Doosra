@@ -155,6 +155,25 @@ The model is [{user}/doosra-win-probability](https://huggingface.co/{user}/doosr
 """
 
 
+def build_ball_outcome() -> Path:
+    """The ball-outcome model repo: per format the LightGBM model, its spec, the player-form snapshot, the
+    report and calibration plot, plus the predictor. The card is written after trying the predictor."""
+    src, out = ROOT / "ml" / "out" / "ball_outcome", fresh(OUT / "ball-outcome-model")
+    shutil.copy(ROOT / "ml" / "hf" / "ball_outcome" / "predict_ball.py", out)
+    for g in ("T20", "ODI"):
+        low = g.lower()
+        shutil.copy(src / g / "lightgbm.txt", out / f"lightgbm-{low}.txt")
+        shutil.copy(src / g / "spec.json", out / f"spec-{low}.json")
+        shutil.copy(src / g / "players.parquet", out / f"players-{low}.parquet")
+        (out / "reports" / g).mkdir(parents=True)
+        for f in ("report.json", "calibration.png"):
+            shutil.copy(src / g / f, out / "reports" / g / f)
+    card = ROOT / "ml" / "hf" / "ball_outcome" / "README.md"
+    if card.exists():
+        shutil.copy(card, out / "README.md")
+    return out
+
+
 def main() -> None:
     reports = {g: json.loads((REPORTS / g / "report.json").read_text(encoding="utf-8")) for g in ("T20", "ODI")}
     model = fresh(OUT / "winprob-model")
@@ -184,7 +203,8 @@ def main() -> None:
                                                       "wicket", "wp", "text")} for b in r["balls"]],
                          "moments": r["moments"]}
     (space / "replays.json").write_text(json.dumps(replays), encoding="utf-8")
-    for d in (model, space):
+    ball = build_ball_outcome()
+    for d in (model, space, ball):
         size = sum(p.stat().st_size for p in d.rglob("*") if p.is_file())
         print(f"{d}: {len(list(d.rglob('*.*')))} files, {size / 1e6:.1f} MB")
 
