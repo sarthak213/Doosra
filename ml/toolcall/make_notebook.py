@@ -32,8 +32,8 @@ Exports a GGUF (Q4_K_M) that Doosra's built-in llama.cpp engine runs, and pushes
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"   # one GPU: Kaggle's second T4 would split the model and slow it down
 RUN = "A"            # "A" (Kaggle) or "B" (Colab)
 SMOKE = False        # True: a few steps on a few examples, to check the notebook end to end (~20 minutes)
-TRAIN_EXAMPLES = 1600  # a shuffled subset: at ~3 min per 16 examples on a T4 (float32), 2 epochs of 1,600 is ~10 h
-HOURS = 10.5         # stop training (and save) after this, leaving time for the GGUF export in a 12-hour session
+TRAIN_EXAMPLES = None  # None: all of them. On a free T4 (float32, ~3 min per 16 examples) use 1600: 2 epochs ~10 h
+HOURS = 20           # stop training (and save) after this; on a free 12-hour session use 10.5
 
 CONFIGS = {
     "A": dict(lora_r=16, lora_alpha=16, learning_rate=2e-4, epochs=2),
@@ -66,13 +66,17 @@ os.environ["HF_TOKEN"] = HF_TOKEN
 import torch
 print("platform:", "Kaggle" if ON_KAGGLE else "Colab", "| GPU:", torch.cuda.get_device_name(0),
       "| memory GB:", round(torch.cuda.get_device_properties(0).total_memory / 1e9, 1))
+GPU_GB = torch.cuda.get_device_properties(0).total_memory / 1e9
+BF16 = torch.cuda.is_bf16_supported()      # A100, L4, G4: yes. T4: no, and Qwen3.5 then trains in slow float32
+BATCH = 4 if GPU_GB > 38 else 2 if GPU_GB > 22 else 1   # 16 conversations per step either way
+print("bfloat16:", BF16, "| batch:", BATCH)
 RUN_LOG = {"run": RUN, "platform": "Kaggle" if ON_KAGGLE else "Colab", "gpu": torch.cuda.get_device_name(0),
-           "config": CFG, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "events": []}"""),
+           "config": CFG, "bf16": BF16, "batch": BATCH, "started": time.strftime("%Y-%m-%d %H:%M:%S"), "events": []}"""),
 ("code", """from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 data = load_dataset(DATASET)
 TOOLS = json.load(open(hf_hub_download(DATASET, "tools.json", repo_type="dataset")))
-data["train"] = data["train"].shuffle(seed=3407).select(range(min(TRAIN_EXAMPLES, len(data["train"]))))
+data["train"] = data["train"].shuffle(seed=3407).select(range(min(TRAIN_EXAMPLES or 10**9, len(data["train"]))))
 N_TRAIN = len(data["train"])
 if SMOKE:
     data["train"], data["validation"] = data["train"].select(range(64)), data["validation"].select(range(8))
@@ -120,11 +124,12 @@ class TimeBudget(TrainerCallback):
 
 args = SFTConfig(
     output_dir=f"{WORK}/checkpoints-{RUN}", dataset_text_field="text", max_seq_length=MAX_SEQ,
-    per_device_train_batch_size=1, per_device_eval_batch_size=1,   # eval at batch 8 ran out of memory
-    gradient_accumulation_steps=16, num_train_epochs=CFG["epochs"],
+    per_device_train_batch_size=BATCH, per_device_eval_batch_size=1,   # eval at batch 8 ran out of memory on a T4
+    gradient_accumulation_steps=16 // BATCH, num_train_epochs=CFG["epochs"],
     max_steps=4 if SMOKE else -1, learning_rate=CFG["learning_rate"], lr_scheduler_type="cosine", warmup_steps=5,
     logging_steps=1 if SMOKE else 5, eval_strategy="steps", eval_steps=2 if SMOKE else 50, save_strategy="steps",
-    save_steps=2 if SMOKE else 25, save_total_limit=2, optim="adamw_8bit", weight_decay=0.01, fp16=True,
+    save_steps=2 if SMOKE else 50, save_total_limit=2, optim="adamw_8bit", weight_decay=0.01,
+    bf16=BF16, fp16=not BF16,
     prediction_loss_only=True, report_to="none", seed=3407)
 trainer = SFTTrainer(model=model, tokenizer=tok, train_dataset=train, eval_dataset=valid, args=args,
                      callbacks=[TimeBudget()])
