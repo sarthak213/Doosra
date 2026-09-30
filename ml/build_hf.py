@@ -177,8 +177,19 @@ def build_ball_outcome() -> Path:
 def build_toolcall_data() -> Path:
     """The tool-calling dataset repo: the three splits, the tool list and system prompt, and the card."""
     src, out = ROOT / "ml" / "out" / "toolcall", fresh(OUT / "toolcall-data")
-    for f in ("train.jsonl", "validation.jsonl", "test.jsonl", "tools.json", "system_prompt.txt"):
+    for f in ("tools.json", "system_prompt.txt"):
         shutil.copy(src / f, out / f)
+    keys = ("role", "content", "tool_calls", "tool_call_id", "name")
+    for split in ("train", "validation", "test"):
+        # every message with the same keys (null where absent), so datasets infers one schema for all rows
+        rows = []
+        for line in (src / f"{split}.jsonl").read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            r["messages"] = [{k: m.get(k) for k in keys} for m in r["messages"]]
+            r.setdefault("original_question", None)
+            r.pop("paraphrased", None)
+            rows.append(json.dumps(r, ensure_ascii=False))
+        (out / f"{split}.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
     counts = {s: len((src / f"{s}.jsonl").read_text(encoding="utf-8").splitlines()) for s in ("train", "validation", "test")}
     intents, para = {}, 0
     for s in counts:
