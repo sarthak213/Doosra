@@ -600,7 +600,7 @@ and both engine builds, headless), then the installer `desktop/dist/DoosraSetup-
 To release, bump `VERSION` in `backend/version.py`, then push a matching tag:
 
 ```bash
-git tag app-v2.4.0 && git push origin app-v2.4.0
+git tag app-v2.5.0 && git push origin app-v2.5.0
 ```
 
 The Desktop app workflow builds the installer on Windows and publishes it as a GitHub release;
