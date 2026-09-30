@@ -25,6 +25,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "out"
 
+
+def prefer_ipv4() -> None:
+    """Try IPv4 addresses first. Some networks have a broken IPv6 route to Hugging Face's CDN: the connection
+    is reset, and Python (unlike browsers) doesn't fall back to IPv4 on its own."""
+    import socket
+
+    original = socket.getaddrinfo
+
+    def ordered(*args, **kwargs):
+        return sorted(original(*args, **kwargs), key=lambda a: a[0] != socket.AF_INET)
+
+    socket.getaddrinfo = ordered
+
+
+prefer_ipv4()
+
 TARGETS = {
     # name: (repo suffix, repo type, local folder)
     "dataset": ("doosra-cricket", "dataset", OUT / "dataset"),
@@ -65,7 +81,7 @@ def publish(target: str, dry_run: bool = False) -> str:
 
     api = HfApi()
     api.create_repo(repo_id, repo_type=repo_type, exist_ok=True,
-                    **({"space_sdk": "gradio"} if repo_type == "space" else {}))
+                    **({"space_sdk": "static"} if repo_type == "space" else {}))
     api.upload_folder(repo_id=repo_id, repo_type=repo_type, folder_path=str(folder),
                       commit_message=f"Publish {target} from Doosra")
     kind = {"dataset": "datasets/", "space": "spaces/"}.get(repo_type, "")

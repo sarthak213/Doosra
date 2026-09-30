@@ -2,7 +2,7 @@
 Assemble the Hugging Face repos for the win-probability model from the trained files:
 
     python ml/build_hf.py          ->  ml/out/hf/winprob-model/   (model repo: card, models, predictor, reports)
-                                       ml/out/hf/winprob-space/   (Gradio Space: app, models, predictor, replays)
+                                       ml/out/hf/winprob-space/   (static Space: page, JS predictor, models, replays)
 
 Run ml/winprob_train.py first. Publish with `python ml/publish.py winprob` / `winprob-space`.
 """
@@ -141,14 +141,15 @@ title: Doosra win probability
 emoji: 🏏
 colorFrom: green
 colorTo: yellow
-sdk: gradio
-app_file: app.py
+sdk: static
+app_file: index.html
 pinned: false
 license: odc-by
 short_description: Cricket win probability, ball by ball, for T20 and ODI
 ---
 
 Cricket win probability for T20 and ODI matches: replay famous finals ball by ball, or try any situation.
+Static page: the model runs in your browser (`predict.js`, checked against the Python predictor).
 The model is [{user}/doosra-win-probability](https://huggingface.co/{user}/doosra-win-probability), from
 [Doosra](https://github.com/sarthak213/Doosra). Data: [Cricsheet](https://cricsheet.org) (ODC-By 1.0).
 """
@@ -166,12 +167,12 @@ def main() -> None:
             shutil.copy(REPORTS / g / f, model / "reports" / g / f)
     (model / "README.md").write_text(model_card(reports), encoding="utf-8")
 
+    # a static Space (free on Hugging Face): the page runs the model in the browser (static/predict.js)
     space = fresh(OUT / "winprob-space")
-    shutil.copy(SRC / "space_app.py", space / "app.py")
-    shutil.copy(SRC / "predict.py", space)
+    for f in ("index.html", "predict.js"):
+        shutil.copy(SRC / "static" / f, space)
     for g in ("t20", "odi"):
         shutil.copy(MODELS / f"winprob-{g}.json", space)
-    (space / "requirements.txt").write_text("gradio>=5\nnumpy\nplotly\n", encoding="utf-8")
     (space / "README.md").write_text(space_readme(), encoding="utf-8")
     replays = {}
     for name, mid in FINALS.items():
