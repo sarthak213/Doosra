@@ -15,6 +15,7 @@ const NAV = [
   ["/compare", "Compare"],
   ["/query", "Query"],
   ["/matrix", "Matrix"],
+  ["/matches", "Matches"],
   ["/methodology/fibs", "FIBS"],
   ["/data", "Data"],
   ["/ask", "Ask"],

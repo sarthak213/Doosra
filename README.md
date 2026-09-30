@@ -218,6 +218,11 @@ format (`/api/options/scoped`, `analytics/facets.py`).
   export, click through to players.
 - **Player Matrix** (`/matrix`) — every qualified player on two metrics,
   medians as quadrant lines, standouts labelled, watchlist in brass.
+- **Match Replay** (`/matches`, `/matches/:id`) — any T20 or ODI ball by ball: each side's chance of
+  winning after every ball (the win-probability model below), the key moments that swung it (single
+  wickets and boundaries, and whole overs, largest swing first), and the scorecard. "Explain" hands
+  the story to the copilot, which can also find a match itself (`match_replay`: "what was the
+  turning point of the 2024 T20 World Cup final?").
 - **FIBS** (`/methodology/fibs`) — the Fielding-Independent Bowling Statistics methodology page:
   what's skill and what's luck in a cricket record, with every number,
   chart and finding read live from the study (see below). Luckiest and
@@ -555,6 +560,30 @@ the analytics queries run over a database of roughly 700 MB.
 GitHub Pages can't host this: it serves static files only, and Doosra needs
 the API and a database. (A landing page there is possible.) The CI `container`
 job builds the image and smoke-tests it on every push.
+
+## Models
+
+Trained on the dataset itself, and published on Hugging Face with their data (`ml/`).
+
+**Win probability** (`analytics/winprob.py`, trained by `ml/winprob_train.py`): the batting side's chance
+of winning after every ball of a T20 or ODI. For each innings, gradient-boosted trees (LightGBM, with
+monotone constraints: more wickets in hand or balls left can only help, more runs needed can only hurt) are
+blended with a logistic regression on the log-odds scale; the trees capture the non-linear parts and the
+regression keeps the curve smooth from ball to ball. Features: the score, wickets in hand, balls left,
+target, runs needed and required rate, the ground's par (its last 20 first-innings totals before the
+match), and each side's Elo rating from earlier results only. Trained on matches up to 2022, early-stopped on
+2023-24, and tested on everything from 2025 on:
+
+| Test (2025+) | Matches | Log loss | Brier | AUC | Calibration error | Logistic alone | Trees alone | Par heuristic |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| T20 | 2,889 | **0.455** | 0.152 | 0.861 | 0.8% | 0.461 | 0.458 | 0.658 |
+| ODI | 638 | **0.513** | 0.174 | 0.818 | 2.3% | 0.514 | 0.519 | 0.712 |
+
+The app runs the exported models with NumPy (no LightGBM in the app); training checks that the NumPy
+evaluation matches LightGBM's. Retrain with `pip install -r ml/requirements-ml.txt` then
+`python ml/winprob_train.py`, which also writes a report with calibration and by-over accuracy plots.
+
+**The dataset** (`ml/export_dataset.py`): every table as Parquet with a dataset card, for Hugging Face.
 
 ## Building the Windows app
 

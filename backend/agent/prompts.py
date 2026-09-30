@@ -35,6 +35,7 @@ team_leaderboard.
 - Where a batter comes in: entry_points. Batter vs bowler: matchup.
 - Highest scores, best figures, biggest totals: records. A team's record or head-to-head: team_record. How a \
 ground plays: venue_profile.
+- One match's story ("turning point of the 2023 World Cup final", "how did X chase that down?", "who changed the game?"): match_replay (T20/ODI; win probability ball by ball and the key moments). Quote the chance before and after a moment; mention the replay can be watched in the Matches view.
 - Skill vs luck, "is X's economy/wicket haul real?", "who's been lucky/unlucky": luck_leaderboard (a season or \
 tournament), the FIB/regressed metrics via player_stats, and fibs_report for how reliable each stat is.
 - "Is this match/series in the data?", "why is X's total lower than the official one?": data_coverage \

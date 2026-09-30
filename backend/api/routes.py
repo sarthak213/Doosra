@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from analytics import catalog, coverage, engine, facets, registry
+from analytics import catalog, coverage, engine, facets, registry, replay
 from analytics.scope import normalize_filters
 
 from .auth import current_user
@@ -86,6 +86,25 @@ def scoped_options(competition: str | None = None, format: str | None = None, ge
     return facets.facets({"competition": competition, "format": format, "gender": gender, "team": team,
                           "opposition": opposition, "venue": venue, "season": season,
                           "from_year": from_year, "to_year": to_year})
+
+
+# ---------------------------------------------------------------------------
+# Match Replay
+# ---------------------------------------------------------------------------
+
+MATCH_FILTERS = ("competition", "format", "gender", "team", "opposition", "venue", "season", "from_year", "to_year")
+
+
+@router.get("/matches")
+def matches(limit: int = Query(300, ge=1, le=1000), filters: dict = Depends(filter_params)):
+    """Limited-overs matches within the filters, newest first."""
+    return replay.list_matches({k: v for k, v in filters.items() if k in MATCH_FILTERS}, limit=limit)
+
+
+@router.get("/matches/{match_id}/replay")
+def match_replay(match_id: str):
+    """A match ball by ball: the win-probability worm, key moments and the scorecard."""
+    return replay.replay(match_id)
 
 
 @router.get("/search")

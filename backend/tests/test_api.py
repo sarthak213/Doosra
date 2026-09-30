@@ -82,6 +82,16 @@ def test_scoped_options(client):
     assert r.status_code == 200 and r.json()["venues"] == ["City Oval"] and r.json()["seasons"] == ["2023/24"]
 
 
+def test_match_list_and_replay(client):
+    listed = client.get("/api/matches").json()["matches"]
+    assert len(listed) == 3 and listed[0]["date"] >= listed[-1]["date"] and all(m["summary"] for m in listed)
+    assert [m["match_id"] for m in client.get("/api/matches", params={"competition": "Test Bash League"}).json()["matches"]]         == [m["match_id"] for m in listed if m["event_name"] == "Test Bash League"]
+    r = client.get(f"/api/matches/{listed[-1]['match_id']}/replay").json()
+    assert r["match"]["team1"] and len(r["innings"]) == 2 and r["batting"] and r["bowling"]
+    assert r["balls"] and all(0 < b["wp"] < 1 for b in r["balls"]) and isinstance(r["moments"], list)
+    assert client.get("/api/matches/nope/replay").status_code == 400
+
+
 def test_fibs_endpoints(client):
     r = client.get("/api/fibs/report", params={"format": "T20", "gender": "male", "role": "bowling"})
     assert r.status_code == 200 and r.json()["findings"]

@@ -213,6 +213,16 @@ def team_leaderboard(metric: Literal["wins", "win_pct", "matches", "losses"] = "
 
 
 @mcp.tool()
+def match_replay(team: str, opposition: str | None = None, date: str | None = None, filters: Filters = None) -> dict:
+    """One limited-overs match (T20 or ODI) ball by ball, with Doosra's win-probability model: the result, how
+    each side's chance of winning moved over by over, and the key moments (the wickets and boundaries that swung
+    it most). Name a team, and narrow with the opposition, date (YYYY-MM-DD) or filters (competition, season).
+    Use for 'turning point of ...', 'how did X win/lose ...', 'who changed the game in ...'."""
+    from analytics import replay
+    return replay.match_story(team, opposition, date, **_f(filters))
+
+
+@mcp.tool()
 def venue_profile(venue: str, filters: Filters = None) -> dict:
     """How a ground plays, per format: average 1st/2nd innings scores, bat-first vs chasing wins (and which
     it favours), toss decisions, highest total."""

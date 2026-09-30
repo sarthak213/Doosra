@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doosra win probability</title>
+<meta name="description" content="Cricket win probability, ball by ball, for T20 and ODI matches. Runs in your browser.">
+<style>
+  :root { --pitch: #0f1e16; --raised: #16281d; --raised2: #1c3024; --cream: #f1e8d6; --dim: #a79c87;
+    --line: rgba(241,232,214,.12); --brass: #b08a3a; --blue: #3987e5; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--pitch); color: var(--cream); font: 15px/1.5 "IBM Plex Sans", system-ui, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px 16px 48px; }
+  h1 { font: 600 30px/1.2 Georgia, serif; margin: 0 0 6px; }
+  a { color: var(--brass); }
+  .muted { color: var(--dim); }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .tabs { display: flex; gap: 6px; margin: 22px 0 16px; }
+  .tabs button { background: none; border: 1px solid var(--line); color: var(--dim); padding: 7px 14px; border-radius: 8px;
+    font: inherit; cursor: pointer; }
+  .tabs button.on { color: var(--cream); border-color: var(--brass); }
+  .panel { background: var(--raised); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  select, input { background: var(--raised2); color: var(--cream); border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 10px; font: inherit; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; margin-top: 14px; }
+  .moments { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; max-height: 420px; overflow: auto; }
+  .moments li { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; gap: 10px; }
+  .no { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--blue); display: grid; place-items: center;
+    font: 600 11px "IBM Plex Mono", monospace; }
+  .moments small { display: block; color: var(--dim); }
+  svg text { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .form { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+  .big { font: 600 64px/1 Georgia, serif; color: var(--brass); margin: 18px 0 6px; }
+  .bar { height: 14px; border-radius: 7px; background: var(--blue); overflow: hidden; margin: 10px 0; }
+  .bar div { height: 100%; background: var(--brass); }
+  footer { margin-top: 28px; font-size: 13px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Cricket win probability, ball by ball</h1>
+  <p class="muted">The batting side's chance of winning a T20 or ODI after any ball, from a model trained on 17,000+
+    matches of ball-by-ball data. It runs entirely in your browser. From
+    <a href="https://github.com/sarthak213/Doosra">Doosra</a>; model:
+    <a href="https://huggingface.co/Sarthak213/doosra-win-probability">Sarthak213/doosra-win-probability</a>.</p>
+
+  <div class="tabs" role="tablist">
+    <button class="on" data-tab="replay" role="tab">Replay a final</button>
+    <button data-tab="whatif" role="tab">What if</button>
+  </div>
+
+  <section id="replay" class="panel">
+    <label>Match <select id="match"></select></label>
+    <p id="summary" class="mono" style="margin:12px 0 0">Loading the model (about 10 MB, once)…</p>
+    <div class="grid">
+      <svg id="worm" viewBox="0 0 720 360" role="img" aria-label="Win probability through the match"></svg>
+      <ol id="moments" class="moments"></ol>
+    </div>
+  </section>
+
+  <section id="whatif" class="panel" hidden>
+    <div class="form">
+      <label>Format <select id="fmt"><option>T20</option><option>ODI</option></select></label>
+      <label>Innings <select id="inn"><option value="2">Chasing</option><option value="1">Batting first</option></select></label>
+      <label>Score <input id="score" type="number" value="151" min="0"></label>
+      <label>Wickets down <input id="wkts" type="number" value="4" min="0" max="9"></label>
+      <label>Overs bowled <input id="overs" type="number" value="16" min="0" step="0.1"></label>
+      <label>Target (chasing) <input id="target" type="number" value="177" min="1"></label>
+      <label>Ground's par score <input id="par" type="number" value="160" placeholder="unknown"></label>
+      <label>Team strength (Elo difference) <input id="elo" type="number" value="0" step="10"></label>
+      <label>Women's cricket <select id="female"><option value="0">No</option><option value="1">Yes</option></select></label>
+    </div>
+    <div class="big" id="pct">–</div>
+    <div class="bar"><div id="barfill" style="width:50%"></div></div>
+    <p id="explain" class="muted"></p>
+  </section>
+
+  <footer class="muted">Data: <a href="https://cricsheet.org">Cricsheet</a>, under the ODC-By 1.0 licence. Trained on
+    matches up to 2022 and tested on 2025 onwards (log loss 0.455 T20, 0.513 ODI; well calibrated). Tests aren't covered.</footer>
+</main>
+<script src="predict.js"></script>
+<script>
+const { WinProbability } = window.DoosraWinProb;
+const $ = (id) => document.getElementById(id);
+const pct = (p) => `${Math.round(p * 100)}%`;
+let models = {}, replays = {};
+
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  ["replay", "whatif"].forEach((t) => $(t).hidden = t !== b.dataset.tab);
+});
+
+function drawWorm(r) {
+  const W = 720, H = 360, L = 44, R = 12, T = 22, B = 34, overs = r.overs;
+  const x = (b) => L + ((b.innings - 1) * overs + b.legal / 6) / (2 * overs) * (W - L - R);
+  const y = (p) => T + (1 - p) * (H - T - B);
+  const s = [];
+  for (const v of [0, .25, .5, .75, 1]) {
+    s.push(`<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="rgba(241,232,214,${v === .5 ? .35 : .1})" ${v === .5 ? 'stroke-dasharray="4 4"' : ""}/>`);
+    s.push(`<text x="${L - 6}" y="${y(v) + 4}" fill="#a79c87" font-size="11" text-anchor="end">${v * 100}%</text>`);
+  }
+  const step = overs >= 40 ? 10 : 5;
+  for (let t = 0; t <= 2 * overs; t += step) {
+    const xx = L + t / (2 * overs) * (W - L - R);
+    s.push(`<text x="${xx}" y="${H - B + 16}" fill="#a79c87" font-size="11" text-anchor="middle">${t === overs ? "" : t > overs ? t - overs : t}</text>`);
+  }
+  const bx = L + (W - L - R) / 2;
+  s.push(`<line x1="${bx}" x2="${bx}" y1="${T}" y2="${H - B}" stroke="rgba(241,232,214,.35)"/>`);
+  s.push(`<text x="${bx + 5}" y="${T + 11}" fill="#a79c87" font-size="11">innings break</text>`);
+  s.push(`<text x="${L + 6}" y="${T + 11}" fill="#a79c87" font-size="11">▲ ${r.team1} ahead</text>`);
+  s.push(`<text x="${L + 6}" y="${H - B - 6}" fill="#a79c87" font-size="11">▼ ${r.team2} ahead</text>`);
+  s.push(`<text x="${(W + L) / 2}" y="${H - 4}" fill="#a79c87" font-size="11" text-anchor="middle">overs: first innings, then the chase</text>`);
+  s.push(`<polyline fill="none" stroke="#b08a3a" stroke-width="2" points="${r.balls.map((b) => `${x(b).toFixed(1)},${y(b.wp).toFixed(1)}`).join(" ")}"/>`);
+  r.balls.filter((b) => b.wicket).forEach((b) => s.push(`<circle cx="${x(b)}" cy="${y(b.wp)}" r="4" fill="#f1e8d6" stroke="#16281d" stroke-width="2"><title>${b.text}</title></circle>`));
+  const at = new Map(r.balls.map((b) => [`${b.innings}-${b.seq}`, b]));
+  r.moments.forEach((m, i) => {
+    const b = at.get(`${m.innings}-${m.seq}`);
+    if (b) s.push(`<g><circle cx="${x(b)}" cy="${y(b.wp)}" r="9" fill="#1c3024" stroke="#3987e5" stroke-width="2"/><text x="${x(b)}" y="${y(b.wp) + 4}" fill="#f1e8d6" font-size="10.5" text-anchor="middle">${i + 1}</text><title>${m.text}</title></g>`);
+  });
+  $("worm").innerHTML = s.join("");
+}
+
+function showReplay(name) {
+  const r = replays[name];
+  $("summary").textContent = `${r.team1} v ${r.team2}: ${r.summary}. The line is ${r.team1}'s chance of winning.`;
+  drawWorm(r);
+  $("moments").innerHTML = r.moments.map((m, i) => `<li><span class="no">${i + 1}</span><span><strong>${m.text}</strong>` +
+    `<small>${m.batting_team} ${m.score} · ${m.team} ${pct(m.before)} → ${pct(m.after)}</small></span></li>`).join("");
+}
+
+function whatIf() {
+  const fmt = $("fmt").value, total = fmt === "ODI" ? 50 : 20, inn = Number($("inn").value);
+  const ov = Number($("overs").value) || 0, whole = Math.floor(ov), part = Math.min(Math.round((ov - whole) * 10), 5);
+  const ballsLeft = Math.max(total * 6 - (whole * 6 + part), 0);
+  const score = Number($("score").value) || 0, wickets = Math.min(Number($("wkts").value) || 0, 9);
+  const target = inn === 2 ? Number($("target").value) || null : null;
+  $("target").disabled = inn !== 2;
+  const par = $("par").value === "" ? null : Number($("par").value);
+  const p = models[fmt].predict({ innings: inn, score, wickets, ballsLeft, target, venuePar: par,
+    female: $("female").value === "1", eloDiff: Number($("elo").value) || 0 });
+  $("pct").textContent = pct(p);
+  $("barfill").style.width = `${p * 100}%`;
+  const need = inn === 2 && target ? `, needing ${target - score} off ${ballsLeft} balls` : "";
+  $("explain").textContent = `The side ${inn === 2 ? "chasing" : "batting first"} at ${score}/${wickets} after ${ov} overs${need} ` +
+    `wins about ${pct(p)} of the time (bowling side ${pct(1 - p)}).`;
+}
+
+Promise.all([fetch("winprob-t20.json"), fetch("winprob-odi.json"), fetch("replays.json")].map((f) => f.then((r) => r.json())))
+  .then(([t20, odi, rp]) => {
+    models = { T20: new WinProbability(t20), ODI: new WinProbability(odi) };
+    replays = rp;
+    $("match").innerHTML = Object.keys(rp).map((n) => `<option>${n}</option>`).join("");
+    $("match").onchange = (e) => showReplay(e.target.value);
+    showReplay(Object.keys(rp)[0]);
+    document.querySelectorAll("#whatif input, #whatif select").forEach((el) => el.oninput = whatIf);
+    whatIf();
+  });
+</script>
+</body>
+</html>
