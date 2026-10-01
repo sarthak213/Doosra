@@ -7,10 +7,12 @@ from __future__ import annotations
 
 EPOCH_STEPS = 366          # 5,854 conversations / 16 per step
 
+TITLES = {"a": "Run A", "b": "Run B", "b-step350": "Run B at step 350"}
+
 RUNS = {
     "a": "rank 16, learning rate 2e-4, 1 epoch",
     "b": "rank 32, learning rate 1e-4, 2 epochs",
-    "b-step350": "rank 32, learning rate 1e-4, stopped at step 350 (about 1 epoch)",
+    "b-step350": "rank 32, learning rate 1e-4, stopped at step 350 of 732: about 1 epoch",
 }
 
 
@@ -24,6 +26,8 @@ def card(name: str, repo: str, log: dict, evaluation: str | None, sessions_note:
     first, best, last = evals[0], min(evals, key=lambda e: e[1]), evals[-1]
     epochs = c["epochs"]
     steps = last[0]
+    length = (f"{steps} steps (about 1 epoch) of a {epochs}-epoch run, exported from its step-{steps} checkpoint"
+              if log.get("stopped_at") else f"{epochs} epoch{'s' if epochs != 1 else ''}, {steps} steps")
     return f"""---
 license: apache-2.0
 base_model: Qwen/Qwen3.5-4B
@@ -45,7 +49,7 @@ datasets:
 - Sarthak213/doosra-toolcalls
 ---
 
-# Doosra tool caller: Qwen3.5 4B fine-tuned to use a cricket analytics toolkit ({name})
+# Doosra tool caller: Qwen3.5 4B fine-tuned to use a cricket analytics toolkit ({TITLES.get(name, name)})
 
 [Doosra](https://github.com/sarthak213/Doosra) is a cricket analytics app with a local AI copilot: you ask a question,
 and the model answers it by calling Doosra's 25 tools (leaderboards, player profiles, match-ups, venues, records,
@@ -57,7 +61,7 @@ This is Qwen3.5 4B **fine-tuned on 5,854 of Doosra's own tool-calling conversati
 the job, and does it with a **prompt about 8x shorter** (about 280 tokens instead of 2,100, plus compact tool
 schemas), which matters on a laptop where reading the prompt is the slow part.
 
-Run **{name.upper()}** of the project's comparison ({RUNS.get(name, "")}); see [Evaluation](#evaluation).
+**{TITLES.get(name, name)}** of the project's comparison ({RUNS.get(name, "")}); see [Evaluation](#evaluation).
 
 ## What it does
 
@@ -137,14 +141,14 @@ list and thinking off, exactly as the app sends them.
 | Base weights | 16-bit (bfloat16), not 4-bit QLoRA |
 | Optimiser | AdamW 8-bit, learning rate {c['learning_rate']:g}, cosine schedule, 5 warm-up steps, weight decay 0.01 |
 | Batch | 16 conversations per step ({log.get('batch', 2)} × {16 // (log.get('batch') or 2)} accumulation), sequences up to 6,144 tokens |
-| Length | {epochs} epoch{'s' if epochs != 1 else ''}, {steps} steps |
+| Length | {length} |
 | Hardware | Google Colab, {log['gpu']}, peak memory {log.get('peak_memory_gb', '?')} GB |
 | Time | {sessions_note} |
 
 ![Loss curves](training_loss.png)
 
 Validation loss fell from {first[1]:.3f} (step {first[0]}) to {best[1]:.4f} (step {best[0]}) and ended at {last[1]:.4f}.
-{"It levelled off by the end of the first epoch (step " + str(EPOCH_STEPS) + "): the second epoch kept lowering the training loss but not the validation loss, so it fitted the training conversations more closely without doing better on new ones. The project's run A trains for one epoch, and a step-350 copy of this run is kept to test the difference." if epochs >= 2 else ""}
+{"It levelled off by the end of the first epoch (step " + str(EPOCH_STEPS) + "): the second epoch kept lowering the training loss but not the validation loss, so it fitted the training conversations more closely without doing better on new ones. The project's run A trains for one epoch, and a step-350 copy of this run is kept to test the difference." if epochs >= 2 and not log.get("stopped_at") else ""}
 
 ## Evaluation
 

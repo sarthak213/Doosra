@@ -206,6 +206,9 @@ def build_toolcall_data() -> Path:
 
 
 TOOLCALL_SESSIONS = {
+    "a": "2.1 hours in one A100 session (21 s a step)",
+    "b-step350": "the first 350 steps of run B: about 2 hours of A100 time, including a disconnect at step 195 that "
+                 "resumed from the step-150 checkpoint",
     "b": "about 4 hours of A100 time over two sessions (about 20 s a step); the first session disconnected at step 195 "
          "and training resumed from the step-150 checkpoint on Google Drive",
 }
@@ -219,6 +222,11 @@ def build_toolcall_model(run: str) -> Path:
     from huggingface_hub import hf_hub_download
     repo = f"Sarthak213/doosra-qwen3.5-4b-toolcalls-{run}"
     log = json.loads(Path(hf_hub_download(repo, "run_log.json", force_download=True)).read_text(encoding="utf-8"))
+    if log.get("exported_from"):          # exported from a saved checkpoint: its training is run B's, up to that step
+        stop = int(log["exported_from"].rsplit("step", 1)[-1])
+        parent = json.loads(Path(hf_hub_download(repo.rsplit("-", 1)[0], "run_log.json")).read_text(encoding="utf-8"))
+        log = {**parent, "stopped_at": stop,
+               "log_history": [h for h in parent["log_history"] if h.get("step", 0) <= stop]}
     out = fresh(OUT / f"toolcall-model-{run}")
     model_card.loss_plot(log, out / "training_loss.png")
     evaluation = ROOT / "ml" / "hf" / "toolcall" / f"evaluation-{run}.md"      # written once ToolEval has results
