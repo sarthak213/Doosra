@@ -87,3 +87,57 @@ def test_the_generated_dataset_is_well_formed():
     rows = [json.loads(line) for line in (ROOT / "ml" / "out" / "toolcall" / "train.jsonl").read_text(
         encoding="utf-8").splitlines()[:200]]
     assert v.check(rows, tools) == []
+
+
+class TestDatasetV2:
+    """What the first fine-tunes taught us (they aced the templates and lost on open questions)."""
+
+    def test_compact_tools_keep_the_sql_schema(self):
+        sql = [{"type": "function", "function": {"name": "run_sql", "description": "Read-only SQL. Tables: matches(...).",
+                                                 "parameters": {"type": "object", "properties": {}}}}]
+        assert "Tables: matches" in graph.compact_tools(sql)[0]["function"]["description"]
+
+    def test_a_team_record_answer_has_its_numbers(self):
+        answers = load("answers")
+        view = {"title": "Results — India vs Australia", "filters": {"gender": "male", "team": "India", "opposition": "Australia"},
+                "notes": ["No gender specified -- defaulted to male cricket."],
+                "rows": [{"matches": 171, "won": 75, "lost": 73, "no_result": 23, "win_pct": 50.68,
+                          "won_batting_first": 31, "batted_first": 72, "won_chasing": 44, "chased": 99, "tosses_won": 68}]}
+        a = answers.write(random.Random(0), "team", [view], {"team": "India", "opposition": "Australia"})
+        assert "**171** matches" in a and "**75** won" in a and "No gender" not in a
+
+    def test_a_recovery_answers_from_the_corrected_call(self):
+        answers = load("answers")
+        err = {"error": "Binder Error: column competition not found"}
+        ok = {"rows": [{"matches": 1243}]}
+        a = answers.write(random.Random(0), "sql", [err, ok], {"what": "IPL matches", "use_last": True})
+        assert a == "**1,243** IPL matches."
+
+    def test_split_labels_read_as_positions_and_innings(self):
+        answers = load("answers")
+        view = {"title": "Batting — X by batting position — T20I", "rows": [{"position_no": "7", "runs": 39}],
+                "highlights": {"best_runs": "39 (7)"}}
+        a = answers.write(random.Random(0), "split", [view], {"player": "X", "split": "position"})
+        assert "39 (No. 7)" in a
+
+    def test_quality_check_catches_answers_without_figures(self):
+        validate = load("validate")
+        bad = {"id": "x", "intent": "team_record", "question": "How have Oman done?", "messages": [
+            {"role": "tool", "content": '{"rows": [{"matches": 106}]}'},
+            {"role": "assistant", "tool_calls": [{"function": {"name": "final_answer",
+                                                               "arguments": json.dumps({"answer": "**Oman**'s results:"})}}]}]}
+        assert any("no figures" in p for p in validate.quality([bad]))
+
+    def test_training_keeps_clear_of_the_evaluation(self):
+        gen = load("generate")
+        intents = load("intents")
+        assert gen.eval_overlap(intents.Example("x", "How many sixes has Virat Kohli hit?", [("player_stats", {})]))
+        assert gen.eval_overlap(intents.Example("x", "Most IPL runs?", [("leaderboard", {
+            "metric": "runs", "filters": {"competition": "Indian Premier League"}})]))
+        assert not gen.eval_overlap(intents.Example("x", "Most IPL runs in 2016?", [("leaderboard", {
+            "metric": "runs", "filters": {"competition": "Indian Premier League", "season": "2016"}})]))
+
+    def test_grading_accepts_name_and_competition_variants(self):
+        export = load("export_eval")
+        assert export.tokens("Virat Kohli leads IPL run-scoring.") == ["Kohli", ["IPL", "Indian Premier League"]]
+        assert export.tokens("A strike rate of 132.92 for RG Sharma.") == ["132.92", "Sharma"]

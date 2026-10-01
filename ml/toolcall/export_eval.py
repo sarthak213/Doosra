@@ -36,6 +36,66 @@ SRC = ROOT / "ml" / "out" / "toolcall"
 OUT = SRC / "eval-pack"
 
 
+MANUAL = {"q22", "q23", "q26", "q35", "q36"}     # open-ended (a qualification or definition to choose): reviewed by hand
+VARIANTS = {"IPL": ["IPL", "Indian Premier League"], "T20Is": "T20I", "ODIs": "ODI", "17-20": ["17-20", "death"]}
+
+
+def tokens(expected: str) -> list:
+    """What an answer must contain, from an expected answer verified against the database: its numbers and names,
+    accepting the usual variants. A given name or initials before a surname is dropped ('Virat Kohli' and 'V Kohli'
+    both need only 'Kohli'); 'IPL' also matches 'Indian Premier League'; plurals of formats match the singular."""
+    raw = _expected_tokens(expected)
+    word = lambda t: t[:1].isupper() and not any(ch.isdigit() for ch in t)  # noqa: E731
+    out = []
+    for i, t in enumerate(raw):
+        if word(t) and i + 1 < len(raw) and word(raw[i + 1]) and not raw[i + 1].isupper():     # 'Kohli IPL' keeps Kohli
+            continue
+        t = t.strip("().:;")
+        if t and t not in ("Both", "Played/won", "About"):
+            out.append(VARIANTS.get(t, t))
+    return out
+
+
+async def computed_facts() -> dict[str, list]:
+    """The facts behind the descriptive expected answers ('A specific player named with a count'), from the same
+    tools and tables the agent uses, so they stay right as the data is updated."""
+    from analytics import db
+    async with create_connected_server_and_client_session(mcp) as s:
+        async def tool(name, args):
+            return json.loads((await s.call_tool(name, args)).content[0].text)
+        ipl = {"competition": "Indian Premier League"}
+        top = (await tool("leaderboard", {"metric": "runs", "filters": ipl}))["rows"][0]
+        avgs = (await tool("compare_players", {"players": ["Virat Kohli", "Rohit Sharma"], "metrics": ["average"],
+                                               "filters": ipl}))["rows"]
+        seasons = (await tool("player_stats", {"player": "Virat Kohli", "split_by": "season", "metrics": ["runs"],
+                                               "filters": ipl}))["rows"]
+        h2h = (await tool("team_record", {"team": "India", "opposition": "Pakistan",
+                                          "filters": {"format": "ODI", "gender": "male"}}))["rows"][0]
+        mu = (await tool("matchup", {"batter": "Virat Kohli", "bowler": "Rashid Khan"}))["rows"][0]
+        total = (await tool("records", {"kind": "team_total", "filters": ipl}))["rows"][0]
+    surname = lambda x: str(x).split()[-1]  # noqa: E731
+    n = lambda x: f"{x:,}" if isinstance(x, int) and x >= 1000 else str(x)  # noqa: E731
+    best = max(seasons, key=lambda r: r[1])
+    venue = db.query("SELECT venue, COUNT(*) n FROM matches GROUP BY 1 ORDER BY 2 DESC LIMIT 1")[0]
+    wins = db.query("SELECT winner, COUNT(*) n FROM matches WHERE winner IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 1")[0]
+    pom = db.query("SELECT player_of_match p, COUNT(*) n FROM matches WHERE player_of_match IS NOT NULL "
+                   "GROUP BY 1 ORDER BY 2 DESC LIMIT 1")[0]
+    players = db.query("SELECT COUNT(DISTINCT player) n FROM players_matches")[0]["n"]
+    return {
+        "q21": [surname(top[1])],
+        "q24": [str(avgs[0][1]), str(avgs[1][1])],
+        "q25": [str(best[0]), n(best[1])],
+        "q27": [str(h2h[0]), str(h2h[1]), str(h2h[2])],
+        "q28": [venue["venue"].split(",")[0].split()[0], n(venue["n"])],
+        "q29": [str(mu[1]), str(mu[0])],
+        "q30": ["caught"],
+        "q31": [wins["winner"], n(wins["n"])],
+        "q32": [surname(pom["p"]), n(pom["n"])],
+        "q33": [total[1].split("/")[0], surname(total[0])],
+        "q34": [n(players)],
+    }
+
+
 async def full_tools() -> list:
     async with create_connected_server_and_client_session(mcp) as s:
         return graph.mcp_tools_to_openai((await s.list_tools()).tools) + graph.LOCAL_TOOLS + [graph.FINAL_ANSWER]
@@ -55,16 +115,28 @@ def main() -> None:
     (OUT / "test.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
     shutil.copy(SRC / "system_prompt.txt", OUT / "profiles" / "compact" / "system_prompt.txt")
     shutil.copy(SRC / "tools.json", OUT / "profiles" / "compact" / "tools.json")
+    if (SRC / "v1" / "tools.json").exists():     # what the first fine-tunes were trained with, to test them fairly
+        (OUT / "profiles" / "compact-v1").mkdir(parents=True)
+        for f in ("system_prompt.txt", "tools.json"):
+            shutil.copy(SRC / "v1" / f, OUT / "profiles" / "compact-v1" / f)
     cat = catalog.get_catalog()
     (OUT / "profiles" / "full" / "system_prompt.txt").write_text(
         build_system_prompt(date_min=cat.date_min, date_max=cat.date_max, today=dt.date.today().isoformat()),
         encoding="utf-8")
     (OUT / "profiles" / "full" / "tools.json").write_text(json.dumps(asyncio.run(full_tools()), indent=1), encoding="utf-8")
     questions = json.loads((ROOT / "backend" / "tests" / "eval_fixtures" / "eval_questions.json").read_text(encoding="utf-8"))["questions"]
-    (OUT / "questions.jsonl").write_text("".join(json.dumps(
-        {"id": q["id"], "question": q["question"], "expected": q["expected_answer"],
-         "must_include": _expected_tokens(q["expected_answer"])}, ensure_ascii=False) + "\n" for q in questions),
-        encoding="utf-8")
+    facts = asyncio.run(computed_facts())
+    rows = []
+    for q in questions:
+        if q["id"] in MANUAL:
+            grade, must = "manual", []
+        elif q["id"] in facts:
+            grade, must = "auto", facts[q["id"]]
+        else:
+            grade, must = "auto", tokens(q["expected_answer"])
+        rows.append({"id": q["id"], "question": q["question"], "expected": q["expected_answer"], "grade": grade,
+                     "must_include": must})
+    (OUT / "questions.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     (OUT / "dataset.json").write_text(json.dumps({
         "name": "Doosra tool calls",
         "answer_tool": {"name": "final_answer", "arg": "answer"},

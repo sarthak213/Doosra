@@ -79,6 +79,50 @@ def leaks(rows: list[dict], held: set[str]) -> list[str]:
     return out
 
 
+NO_NUMBERS_OK = {"open", "search_metrics", "lookup"}     # answers that legitimately quote no figure
+
+
+def quality(rows: list[dict]) -> list[str]:
+    """The answer, not just the format: it quotes a figure from the results (an answer with none taught the first
+    models to reply "India's results: ..." and nothing else), its figures all come from the results, and no
+    bracket is empty or garbled ('****', '()')."""
+    import re
+    out = []
+    num = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?")
+    for r in rows:
+        answer = json.loads(r["messages"][-1]["tool_calls"][0]["function"]["arguments"])["answer"]
+        results = " ".join(m["content"] or "" for m in r["messages"] if m["role"] == "tool")
+        known = {x.replace(",", "") for x in num.findall(results + " " + r["question"])}
+        known_f = set()
+        for k in known:
+            try:
+                known_f.add(round(float(k), 4))
+            except ValueError:
+                pass
+        found = [x.replace(",", "") for x in num.findall(answer)]
+        if not found and r["intent"] not in NO_NUMBERS_OK:
+            out.append(f"{r['id']} ({r['intent']}): no figures in the answer")
+        stray = [x for x in found if x not in known and round(float(x), 4) not in known_f
+                 and not re.fullmatch(r"\d{4}", x) and float(x) > 4]     # years and small ordinals are written, not quoted
+        if stray:
+            out.append(f"{r['id']} ({r['intent']}): figures not in the results {stray[:3]}")
+        if "****" in answer or "()" in answer:
+            out.append(f"{r['id']} ({r['intent']}): empty bold or brackets")
+    return out
+
+
+def eval_overlap(rows: list[dict]) -> list[str]:
+    """No training question may copy one of the end-to-end evaluation questions (backend/tests/eval_fixtures):
+    the evaluation would then measure memory, not skill."""
+    import re
+    path = HERE.parents[1] / "backend" / "tests" / "eval_fixtures" / "eval_questions.json"
+    if not path.exists():
+        return []
+    norm = lambda q: " ".join(re.findall(r"[a-z0-9]+", q.lower()))  # noqa: E731
+    evals = {norm(q["question"]): q["id"] for q in json.loads(path.read_text(encoding="utf-8"))["questions"]}
+    return [f"{r['id']}: copies eval question {evals[norm(r['question'])]}" for r in rows if norm(r["question"]) in evals]
+
+
 def main() -> int:
     tools = {t["function"]["name"] for t in json.loads((OUT / "tools.json").read_text(encoding="utf-8"))}
     pools = entities.load()
@@ -87,7 +131,7 @@ def main() -> int:
     problems = []
     for split in ("train", "validation", "test"):
         rows = [json.loads(l) for l in (OUT / f"{split}.jsonl").read_text(encoding="utf-8").splitlines()]
-        p = check(rows, tools)
+        p = check(rows, tools) + quality(rows) + eval_overlap(rows)
         if split != "test":
             p += leaks(rows, held)
         lengths = [sum(len(json.dumps(m)) for m in r["messages"]) // 4 for r in rows]

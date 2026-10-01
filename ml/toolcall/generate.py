@@ -38,6 +38,56 @@ from analytics import catalog  # noqa: E402
 
 OUT = ROOT / "ml" / "out" / "toolcall"
 
+# Kept out of training so the end-to-end evaluation (backend/tests/eval_fixtures/eval_questions.json) measures
+# skill, not memory: the players and grounds its questions are about, and calls that fetch the same facts.
+EVAL_PLAYERS = {"Virat Kohli", "V Kohli", "Rohit Sharma", "RG Sharma", "Lasith Malinga", "SL Malinga",
+                "Sachin Tendulkar", "SR Tendulkar", "David Warner", "DA Warner", "Rashid Khan"}
+EVAL_VENUES = {"Dubai International Cricket Stadium", "Eden Gardens"}
+EVAL_PAIRS = [{"India", "Australia"}, {"India", "Pakistan"}]
+IPL = "Indian Premier League"
+
+
+def _eval_fact(name: str, args: dict) -> bool:
+    """True when a call fetches a fact one of the evaluation questions asks for."""
+    f = args.get("filters") or {}
+    extra = {k for k in f if k not in ("competition", "format", "gender")}
+    if name == "leaderboard" and not extra - {"phase"}:
+        m, comp, fmt = args.get("metric"), f.get("competition"), f.get("format")
+        if ((comp == IPL and m == "runs" and not extra) or (comp == IPL and m == "economy" and f.get("phase") == "death")
+                or (fmt == "T20I" and m == "wickets" and f.get("gender", "male") == "male" and not extra)
+                or (fmt == "Test" and m == "average" and not extra)
+                or (comp == "ICC Men's T20 World Cup" and m == "wickets" and not extra)):
+            return True
+    if name == "records" and f.get("competition") == IPL and args.get("kind") == "team_total":
+        return True
+    if name == "team_record" and {args.get("team"), args.get("opposition")} in EVAL_PAIRS:
+        return True
+    if name == "run_sql":
+        q = " ".join(args.get("query", "").split())
+        if q in EVAL_SQL or ("event_name = 'Indian Premier League'" in q and "COUNT(*)" in q):
+            return True
+    return False
+
+
+EVAL_SQL = {   # dataset-wide counts the evaluation asks for (q01-q04, q20, q30)
+    "SELECT COUNT(*) AS matches FROM matches", "SELECT COUNT(*) AS deliveries FROM deliveries",
+    "SELECT COUNT(DISTINCT event_name) AS competitions FROM matches",
+    "SELECT COUNT(*) AS run_outs FROM deliveries WHERE wicket_kind = 'run out' AND innings_num <= 2",
+    "SELECT COUNT(*) AS matches FROM matches WHERE gender = 'female'",
+    "SELECT wicket_kind, COUNT(*) AS dismissals FROM deliveries WHERE is_wicket AND innings_num <= 2 GROUP BY 1 ORDER BY 2 DESC LIMIT 5",
+}
+
+
+def eval_overlap(ex) -> bool:
+    text = ex.question
+    if any(p in text for p in EVAL_PLAYERS) or any(v in text for v in EVAL_VENUES):
+        return True
+    for name, args in ex.calls:
+        flat = json.dumps(args)
+        if any(f'"{p}"' in flat for p in EVAL_PLAYERS) or any(v in flat for v in EVAL_VENUES) or _eval_fact(name, args):
+            return True
+    return False
+
 
 def system_prompt() -> str:
     cat = catalog.get_catalog()
@@ -58,12 +108,14 @@ def empty(output) -> bool:
     return "rows" in output and not output["rows"]
 
 
-async def run_calls(session, schemas: dict, calls: list[tuple[str, dict]]):
+async def run_calls(session, schemas: dict, calls: list[tuple[str, dict]], expect: dict | None = None):
     """Execute gold calls the way agent.graph.tools_node does. Returns [(name, args, model_view)] or None
-    if a call fails or returns nothing."""
+    if a call fails or returns nothing. A call the example expects to fail (expect[i] == "error") must fail,
+    and its error is what the model sees, as in the app."""
+    expect = expect or {}
     tables: dict = {}
     done = []
-    for name, args in calls:
+    for i, (name, args) in enumerate(calls):
         args = graph._clean_args(name, args, schemas.get(name))
         if name == "plot_chart":
             output = graph._build_chart(args, tables)
@@ -77,6 +129,11 @@ async def run_calls(session, schemas: dict, calls: list[tuple[str, dict]]):
                 output = await asyncio.wait_for(graph._call_mcp(session, name, args), timeout=60)
             except Exception:  # noqa: BLE001 - a failing call just drops the example
                 return None
+            if expect.get(i) == "error":
+                if not (isinstance(output, dict) and output.get("error")):
+                    return None                  # meant to fail and didn't: not a recovery example
+                done.append((name, args, output))
+                continue
             if empty(output):
                 return None
             ids = []
@@ -115,7 +172,7 @@ async def dump(per_intent: int) -> None:
                 ex = fn(rng, pools)
                 if not ex:
                     continue
-                res = await run_calls(session, schemas, ex.calls)
+                res = await run_calls(session, schemas, ex.calls, ex.expect)
                 if not res:
                     continue
                 print(f"\n===== {name}: {ex.question}")
@@ -149,9 +206,9 @@ async def generate(n: int, seed: int = 7, test_share: float = 0.12, valid_share:
             tried += 1
             split = "test" if counts["test"] < target_test and rng.random() < test_share * 1.5 else "train"
             ex = intents.sample(rng, pools[split])
-            if not ex or ex.question in seen:
+            if not ex or ex.question in seen or eval_overlap(ex):
                 continue
-            res = await run_calls(session, schemas, ex.calls)
+            res = await run_calls(session, schemas, ex.calls, ex.expect)
             if not res:
                 continue
             answer = answers.write(rng, ex.kind, [v for _, _, v in res], ex.meta)

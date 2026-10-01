@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from entities import FORMAT_LABEL, Player, Pools
 
 FORMATS = ["T20I", "ODI", "Test"]
+DEFAULT_BAT = {"matches", "innings", "runs", "average", "strike_rate", "true_sr", "hundreds", "fifties"}  # player_stats
+DEFAULT_BOWL = {"matches", "wickets", "average", "economy", "strike_rate", "true_economy", "best"}
 
 
 @dataclass
@@ -24,6 +26,9 @@ class Example:
     calls: list[tuple[str, dict]]
     kind: str = "table"                         # how the answer is written (answers.py)
     meta: dict = field(default_factory=dict)    # what the answer writer needs to know (the metric, names...)
+    # calls meant to go wrong, by index: "error" (the call must fail, and its error is kept for the model to read)
+    # or "lacking" (it succeeds but without what was asked, so the next call fixes it). Recovery examples.
+    expect: dict = field(default_factory=dict)
 
 
 # ---- vocabulary ---------------------------------------------------------------------------------------
@@ -150,8 +155,9 @@ def leaderboard_format(rng, pools):
     mid, (phrases, label) = pick(rng, metrics.items())
     fmt = pick(rng, FORMATS)
     female = rng.random() < 0.25
-    f = {"format": fmt, **({"gender": "female"} if female else {})}
-    who = "women's " if female else ""
+    mens = not female and rng.random() < 0.3
+    f = {"format": fmt, **({"gender": "female"} if female else {"gender": "male"} if mens else {})}
+    who = "women's " if female else "men's " if mens else ""
     if rng.random() < 0.3:
         y = rng.choice([2015, 2019, 2020, 2023])
         f["from_year"] = y
@@ -206,7 +212,10 @@ def stats_scope(rng, pools):
         s += " " + pick(rng, PHASES[ph])
     q = pick(rng, ["What's {n}'s {w} {s}?", "{n} {w} {s}", "How many {w} does {n} have {s}?" if metric in ("runs", "sixes")
                    else "What is {n}'s {w} {s}?"]).format(n=p.name, w=word, s=s)
-    return Example("stats_scope", " ".join(q.split()), [("player_stats", {"player": p.name, "filters": f})], "stats",
+    args = {"player": p.name, "filters": f}
+    if metric not in DEFAULT_BAT:
+        args["metrics"] = [metric]
+    return Example("stats_scope", " ".join(q.split()), [("player_stats", args)], "stats",
                    {"player": p.name, "metric": metric, "label": word})
 
 
@@ -311,19 +320,23 @@ def team_record(rng, pools):
     opp = [x for x in pools.teams if x["international"] == t["international"] and x["name"] != t["name"]
            and x["gender"] == t["gender"]]
     fmt = pick(rng, FORMATS if t["international"] else ["T20"])
+    g = "women's " if t["gender"] == "female" else ("men's " if rng.random() < 0.4 else "")
+    gf = {"gender": "female"} if t["gender"] == "female" else ({"gender": "male"} if g else {})
     if opp and rng.random() < 0.6:
         o = pick(rng, opp)["name"]
-        q = pick(rng, ["{t} vs {o} head to head in {f}", "What's {t}'s record against {o} in {f}?"]).format(
-            t=t["name"], o=o, f=fmt_phrase(rng, fmt))
-        args = {"team": t["name"], "opposition": o, "filters": {"format": fmt, **gender_filter(t["gender"])}}
+        q = pick(rng, ["{t} vs {o} head to head in {g}{f}", "What's {t}'s record against {o} in {g}{f}?",
+                       "What is the head-to-head record between {t} and {o} in {g}{f}?"]).format(
+            t=t["name"], o=o, g=g, f=fmt_phrase(rng, fmt))
+        args = {"team": t["name"], "opposition": o, "filters": {"format": fmt, **gf}}
     else:
         split = pick(rng, [None, "season", "opposition"])
-        q = pick(rng, ["What's {t}'s record in {f}?", "How have {t} done in {f}?"]).format(t=t["name"], f=fmt_phrase(rng, fmt))
-        args = {"team": t["name"], "filters": {"format": fmt, **gender_filter(t["gender"])}}
+        q = pick(rng, ["What's {t}'s record in {g}{f}?", "How have {t} done in {g}{f}?"]).format(
+            t=t["name"], g=g, f=fmt_phrase(rng, fmt))
+        args = {"team": t["name"], "filters": {"format": fmt, **gf}}
         if split:
             args["split_by"] = split
             q += " " + {"season": "Season by season.", "opposition": "Split by opponent."}[split]
-    return Example("team_record", q, [("team_record", args)], "team", {"team": t["name"]})
+    return Example("team_record", q, [("team_record", args)], "team", {"team": t["name"], "opposition": args.get("opposition")})
 
 
 def team_board(rng, pools):
@@ -393,12 +406,12 @@ def coverage(rng, pools):
     t = pick(rng, [x for x in pools.teams if x["international"]])
     if rng.random() < 0.5:
         q = pick(rng, ["Which {t} {f} matches are missing from the data?", "Is every {t} {f} in the database?"]).format(
-            t=t["name"], f=fmt_phrase(rng, fmt)[:-1] if fmt == "ODI" else "Test")
+            t=t["name"], f=pick(rng, ["ODI", "one-day international"]) if fmt == "ODI" else "Test")
         args = {"view": "missing", "format": fmt, "team": t["name"]}
     else:
         q = pick(rng, ["How complete is the {f} data?", "What does the data cover for {f}?"]).format(f=fmt_phrase(rng, fmt))
         args = {"format": fmt}
-    return Example("coverage", q, [("data_coverage", args)], "coverage", {})
+    return Example("coverage", q, [("data_coverage", args)], "coverage", {"format": fmt})
 
 
 def metric_search(rng, pools):
@@ -415,18 +428,6 @@ def lookup(rng, pools):
         l=last, n=p.name)
     return Example("lookup", q, [("lookup_entity", {"kind": "player", "name": last if "{n}" not in q else p.name})],
                    "lookup", {})
-
-
-def sql(rng, pools):
-    q, query = pick(rng, [
-        ("How many matches are in the dataset?", "SELECT COUNT(*) AS matches FROM matches"),
-        ("How many matches are there per format?", "SELECT match_type, COUNT(*) AS matches FROM matches GROUP BY 1 ORDER BY 2 DESC"),
-        ("Which grounds have hosted the most matches?", "SELECT venue, COUNT(*) AS matches FROM matches GROUP BY 1 ORDER BY 2 DESC LIMIT 10"),
-        ("How many ties are in the data?", "SELECT COUNT(*) AS ties FROM matches WHERE result = 'tie'"),
-        ("Which players have won the most player-of-the-match awards?",
-         "SELECT player_of_match AS player, COUNT(*) AS awards FROM matches WHERE player_of_match IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10"),
-    ])
-    return Example("sql", q, [("run_sql", {"query": query})], "sql", {})
 
 
 def split_then_chart(rng, pools):
@@ -473,13 +474,157 @@ def two_scopes(rng, pools):
                    "two_scopes", {"player": p.name, "scopes": [comp_phrase(rng, c), "T20Is"]})
 
 
+# ---- v2: questions the first models couldn't answer -------------------------------------------------------
+
+STATS = {   # one figure for one player: id -> (role, ways to ask with {n} and {s}, word in the answer)
+    "sixes": ("batting", ["How many sixes has {n} hit {s}?", "{n}'s sixes {s}", "Number of sixes by {n} {s}"], "sixes"),
+    "fours": ("batting", ["How many fours has {n} hit {s}?", "{n}'s boundary count (fours) {s}"], "fours"),
+    "balls": ("batting", ["How many balls has {n} faced {s}?", "Balls faced by {n} {s}"], "balls faced"),
+    "dismissals": ("batting", ["How many times has {n} been dismissed {s}?", "How often has {n} got out {s}?"], "dismissals"),
+    "ducks": ("batting", ["How many ducks has {n} made {s}?", "{n}'s ducks {s}"], "ducks"),
+    "not_outs": ("batting", ["How many times has {n} finished not out {s}?"], "not outs"),
+    "highest": ("batting", ["What is {n}'s highest score {s}?", "{n}'s top score {s}"], "highest score"),
+    "hundreds": ("batting", ["How many hundreds has {n} scored {s}?"], "hundreds"),
+    "innings": ("batting", ["How many innings has {n} batted {s}?"], "innings"),
+    "wickets": ("bowling", ["How many wickets has {n} taken {s}?", "{n}'s wicket tally {s}"], "wickets"),
+    "maidens": ("bowling", ["How many maidens has {n} bowled {s}?"], "maidens"),
+    "five_wkt_hauls": ("bowling", ["How many five-wicket hauls does {n} have {s}?"], "five-wicket hauls"),
+    "bowl_balls": ("bowling", ["How many legal deliveries has {n} bowled {s}?", "How many balls has {n} bowled {s}?"],
+                   "legal deliveries bowled"),
+    "economy": ("bowling", ["What is {n}'s economy rate {s}?"], "economy"),
+}
+
+
+def _stat_scope(rng, p: Player) -> tuple[dict, str]:
+    """A scope for a single figure, sometimes the whole career by gender ('in men's cricket')."""
+    if rng.random() < 0.3:
+        return ({"gender": "female"}, "in women's cricket") if p.gender == "female" else ({"gender": "male"}, "in men's cricket")
+    f, s = player_scope(rng, p)
+    if p.gender == "female" and "format" in f:
+        f = {**f, "gender": "female"}
+        s = s.replace("in ", "in women's ", 1)
+    return f, s
+
+
+def stat_one(rng, pools, recover: bool = False):
+    key, (role, asks, word) = pick(rng, STATS.items())
+    pool = [x for x in pools.players if (x.batter if role == "batting" else x.bowler)]
+    p = pick(rng, pool)
+    f, s = _stat_scope(rng, p)
+    metric = "balls" if key == "bowl_balls" else key
+    q = pick(rng, asks).format(n=p.name, s=s)
+    base = {"player": p.name, **({"role": "bowling"} if role == "bowling" else {}), "filters": f}
+    defaults = DEFAULT_BAT if role == "batting" else DEFAULT_BOWL
+    meta = {"player": p.name, "metric": metric, "label": word}
+    if recover:      # first without the metric, see it's missing, then ask for it
+        if metric in defaults:
+            return None
+        return Example("stat_recover", q, [("player_stats", base), ("player_stats", {**base, "metrics": [metric]})],
+                       "stats", {**meta, "use_last": True}, expect={0: "lacking"})
+    return Example("stat_one", q, [("player_stats", {**base, "metrics": [metric]})], "stats", meta)
+
+
+def stat_recover(rng, pools):
+    return stat_one(rng, pools, recover=True)
+
+
+def _q(text: str) -> str:
+    return text.replace("'", "''")
+
+
+def _sql_cases(rng, pools) -> list[tuple[str, str, str, str | None]]:
+    """(question, query, what the number is, a plausible wrong query or None). Queries follow run_sql's schema
+    and rules: gender filtered, internationals by team_type, super overs excluded."""
+    g = pick(rng, ["male", "female"])
+    gw = "men's" if g == "male" else "women's"
+    comp = pick(rng, [c for c in pools.competitions if (c.get("gender") or "male") == g] or pools.competitions)
+    team = pick(rng, [t for t in pools.teams if t["international"] and t["gender"] == g] or pools.teams)
+    venue = pick(rng, pools.venues)["name"]
+    fmt, fq = pick(rng, [("T20I", "match_type = 'T20' AND team_type = 'international'"), ("ODI", "match_type = 'ODI'"),
+                         ("Test", "match_type = 'Test'")])
+    cn, tn, vn = _q(comp["name"]), _q(team["name"]), _q(venue)
+    return [
+        ("How many matches are in the dataset?", "SELECT COUNT(*) AS matches FROM matches", "matches in the data", None),
+        (f"How many {gw} matches are in the data?", f"SELECT COUNT(*) AS matches FROM matches WHERE gender = '{g}'",
+         f"{gw} matches in the data", None),
+        ("How many deliveries are in the dataset?", "SELECT COUNT(*) AS deliveries FROM deliveries", "deliveries in the data",
+         "SELECT COUNT(*) AS deliveries FROM balls"),
+        (f"How many {gw} {fmt}s are in the data?", f"SELECT COUNT(*) AS matches FROM matches WHERE gender = '{g}' AND {fq}",
+         f"{gw} {fmt}s in the data", None),
+        ("How many run-outs are there in the dataset?",
+         "SELECT COUNT(*) AS run_outs FROM deliveries WHERE wicket_kind = 'run out' AND innings_num <= 2",
+         "run-outs in the data", "SELECT COUNT(*) AS run_outs FROM matches WHERE dismissal = 'run out'"),
+        ("How many stumpings are in the data?",
+         "SELECT COUNT(*) AS stumpings FROM deliveries WHERE wicket_kind = 'stumped' AND innings_num <= 2",
+         "stumpings in the data", "SELECT COUNT(*) AS stumpings FROM deliveries WHERE dismissal_kind = 'stumped'"),
+        ("How many distinct competitions does the data cover?", "SELECT COUNT(DISTINCT event_name) AS competitions FROM matches",
+         "competitions (distinct event names) in the data", "SELECT COUNT(DISTINCT competition) AS competitions FROM matches"),
+        (f"How many {comp['name']} matches are in the data?",
+         f"SELECT COUNT(*) AS matches FROM matches WHERE event_name = '{cn}' AND gender = '{g}'",
+         f"{comp['name']} matches in the data", f"SELECT COUNT(*) AS matches FROM matches WHERE competition = '{cn}'"),
+        (f"How many {gw} matches have {team['name']} played in the data?",
+         f"SELECT COUNT(*) AS matches FROM matches WHERE gender = '{g}' AND (team1 = '{tn}' OR team2 = '{tn}')",
+         f"{gw} matches for {team['name']}", f"SELECT COUNT(*) AS matches FROM matches WHERE team = '{tn}'"),
+        (f"How many {gw} {fmt}s have {team['name']} won?",
+         f"SELECT COUNT(*) AS wins FROM matches WHERE gender = '{g}' AND {fq} AND winner = '{tn}'",
+         f"{gw} {fmt} wins for {team['name']}", None),
+        (f"How many matches have been played at {venue}?", f"SELECT COUNT(*) AS matches FROM matches WHERE venue LIKE '{vn}%'",
+         f"matches at {venue}", f"SELECT COUNT(*) AS matches FROM venues WHERE name = '{vn}'"),
+        ("What is the most common way to get out?",
+         "SELECT wicket_kind, COUNT(*) AS dismissals FROM deliveries WHERE is_wicket AND innings_num <= 2 "
+         "GROUP BY 1 ORDER BY 2 DESC LIMIT 5", "", "SELECT dismissal_type, COUNT(*) FROM deliveries GROUP BY 1"),
+        (f"Who has won the most player-of-the-match awards in {gw} cricket?",
+         f"SELECT player_of_match AS player, COUNT(*) AS awards FROM matches WHERE gender = '{g}' AND player_of_match "
+         "IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 10", "", None),
+        (f"How often do captains choose to bat first after winning the toss in {gw} {fmt}s?",
+         f"SELECT toss_decision, COUNT(*) AS matches FROM matches WHERE gender = '{g}' AND {fq} GROUP BY 1 ORDER BY 2 DESC",
+         "", None),
+        (f"Which grounds have hosted the most {gw} {fmt}s?",
+         f"SELECT venue, COUNT(*) AS matches FROM matches WHERE gender = '{g}' AND {fq} GROUP BY 1 ORDER BY 2 DESC LIMIT 10",
+         "", None),
+        (f"How many {comp['name']} seasons are in the data?",
+         f"SELECT COUNT(DISTINCT season) AS seasons FROM matches WHERE event_name = '{cn}' AND gender = '{g}'",
+         f"{comp['name']} seasons in the data", None),
+        ("How many super overs are in the data?",
+         "SELECT COUNT(DISTINCT match_id) AS matches FROM deliveries WHERE innings_num > 2 AND match_id IN "
+         "(SELECT match_id FROM matches WHERE match_type IN ('T20', 'ODI', 'IT20'))",
+         "matches with a super over in the data", None),
+    ]
+
+
+def sql(rng, pools, recover: bool = False):
+    cases = _sql_cases(rng, pools)
+    if recover:
+        cases = [c for c in cases if c[3]]
+    q, query, what, wrong = pick(rng, cases)
+    if recover:
+        return Example("sql_recover", q, [("run_sql", {"query": wrong}), ("run_sql", {"query": query})], "sql",
+                       {"what": what, "use_last": True}, expect={0: "error"})
+    return Example("sql", q, [("run_sql", {"query": query})], "sql", {"what": what})
+
+
+def sql_recover(rng, pools):
+    return sql(rng, pools, recover=True)
+
+
+def venue_record(rng, pools):
+    v = pick(rng, pools.venues)["name"]
+    kind, ask = pick(rng, [("team_total", ["What is the highest team total at {v}?", "Highest innings total at {v}"]),
+                           ("batting_innings", ["What is the highest individual score at {v}?", "Best innings ever played at {v}"]),
+                           ("bowling_figures", ["What are the best bowling figures at {v}?"])])
+    return Example("venue_record", pick(rng, ask).format(v=v), [("records", {"kind": kind, "filters": {"venue": v}})],
+                   "records", {"kind": kind})
+
+
 INTENTS = {   # intent: (function, weight)
+    "stat_one": (stat_one, 7), "stat_recover": (stat_recover, 2), "sql_recover": (sql_recover, 2),
+    "venue_record": (venue_record, 2),
     "leaderboard_bat": (leaderboard_bat, 8), "leaderboard_bowl": (leaderboard_bowl, 7), "leaderboard_format": (leaderboard_format, 7),
     "profile": (profile, 6), "stats_split": (stats_split, 7), "stats_scope": (stats_scope, 6), "compare": (compare, 6),
     "form": (form, 4), "arc": (arc, 2), "percentiles": (percentiles, 3), "matrix": (matrix, 3), "entry": (entry, 2),
     "similar": (similar, 3), "matchup": (matchup, 5), "team_record": (team_record, 4), "team_board": (team_board, 3),
     "venue": (venue, 4), "records": (records, 4), "luck": (luck, 3), "fibs": (fibs, 1), "replay": (replay, 3),
-    "coverage": (coverage, 2), "search_metrics": (metric_search, 1), "lookup": (lookup, 2), "sql": (sql, 1),
+    "coverage": (coverage, 2), "search_metrics": (metric_search, 1), "lookup": (lookup, 2), "sql": (sql, 5),
     "chart": (split_then_chart, 4), "compare_chart": (compare_then_chart, 2), "open": (open_app, 2),
     "two_scopes": (two_scopes, 3),
 }

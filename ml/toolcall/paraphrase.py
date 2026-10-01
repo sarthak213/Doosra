@@ -117,5 +117,37 @@ def clean() -> None:
         print(f"{split}: {undone} trivial rewrites undone, {sum('original_question' in r for r in rows)} kept")
 
 
+def reuse(src: Path = OUT / "v1") -> None:
+    """Carry over an earlier version's paraphrases: a question generated again word for word gets the rewrite it
+    had (already checked), and one whose rewrite was rejected stays as it is. Only new questions are left."""
+    done, rewrites = set(), {}
+    for split in ("train", "validation", "test"):
+        path = src / f"{split}.jsonl"
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            if r.get("original_question"):
+                rewrites[r["original_question"]] = r["question"]
+            elif r.get("paraphrased"):
+                done.add(r["question"])
+    for split in ("train", "validation", "test"):
+        path = OUT / f"{split}.jsonl"
+        rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()]
+        n_new = n_kept = 0
+        for r in rows:
+            q = r["question"]
+            if q in rewrites:
+                r.update(original_question=q, question=rewrites[q], paraphrased=True)
+                r["messages"][1]["content"] = rewrites[q]
+                n_new += 1
+            elif q in done:
+                r["paraphrased"] = True
+                n_kept += 1
+        path.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in rows), encoding="utf-8")
+        print(f"{split}: {n_new} rewrites reused, {n_kept} kept as they were, "
+              f"{sum(not r.get('paraphrased') for r in rows)} not yet processed")
+
+
 if __name__ == "__main__":
-    clean() if "--clean" in sys.argv else main()
+    clean() if "--clean" in sys.argv else reuse() if "--reuse" in sys.argv else main()

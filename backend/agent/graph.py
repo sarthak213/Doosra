@@ -198,6 +198,11 @@ def _compact_schema(schema):
     return {k: _compact_schema(v) for k, v in schema.items() if k not in ("default", "description", "title")}
 
 
+# Tools whose full description is reference material no training can stand in for: run_sql's is the database
+# schema (cut to one sentence, the fine-tuned model invented tables and columns).
+COMPACT_KEEP_FULL = {"run_sql"}
+
+
 def compact_tools(tools: list[dict]) -> list[dict]:
     """The tool list for Doosra's fine-tuned model: the same names and parameters, each description cut to its
     first sentence and the schemas without noise (the model learned what the tools are for in training)."""
@@ -205,6 +210,8 @@ def compact_tools(tools: list[dict]) -> list[dict]:
     for t in tools:
         f = t["function"]
         first = re.split(r"(?<=[a-z0-9)'][.!?])\s+(?=[A-Z])", " ".join((f.get("description") or "").split()), maxsplit=1)[0]
+        if f["name"] in COMPACT_KEEP_FULL:
+            first = f.get("description") or first
         out.append({"type": "function", "function": {"name": f["name"], "description": first,
                                                      "parameters": _compact_schema(f["parameters"])}})
     return out

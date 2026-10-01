@@ -46,19 +46,24 @@ class Writer:
             return f"**{n}** ({self.aliases[n]})"
         return f"**{n}**"
 
-    def scope(self, view: dict) -> str:
+    def scope(self, view: dict, also: tuple = ()) -> str:
         """The scope from a result's title ('Batting — V Kohli by season — T20I' -> 'T20I'), without the
         parts that just repeat who it's about."""
         title = view.get("title") or ""
-        who = {str(view.get("player") or "")} | set(self.aliases) | set(self.aliases.values())
+        who = {str(view.get("player") or "")} | set(self.aliases) | set(self.aliases.values()) | {str(a) for a in also if a}
         parts = [p.strip() for p in title.split("—")[1:]]
         return ", ".join(p for p in parts if not any(w and w in p for w in who))
+
+    def filter_scope(self, view: dict, skip=("team", "opposition", "player")) -> str:
+        """The scope from a result's filters ('male, ODI'), for results whose title only names who it's about."""
+        f = view.get("filters") or {}
+        return ", ".join(str(v) for k, v in f.items() if k not in skip and v not in (None, ""))
 
     def caveats(self, view: dict, limit: int = 1) -> list[str]:
         keep = []
         for n in view.get("notes") or []:
             low = n.lower()
-            if "is stored as" in low or "resolved to" in low:
+            if "is stored as" in low or "resolved to" in low or "no gender specified" in low:
                 continue
             if any(k in low for k in ("defaulted to", "qualification", "missing", "withhold", "associate", "at least")):
                 keep.append(n.split(" -- ")[0].rstrip("."))
@@ -107,6 +112,12 @@ def leaderboard(w: Writer, v: dict, meta: dict) -> str | None:
     return "\n".join(lines)
 
 
+SPLIT_LABEL = {   # how a split's bare value reads in an answer: '(7)' -> '(No. 7)'
+    "position": lambda x: f"No. {x}",
+    "innings": lambda x: {"1": "1st innings", "2": "2nd innings", "3": "3rd innings", "4": "4th innings"}.get(x, f"innings {x}"),
+}
+
+
 def table_summary(w: Writer, v: dict, meta: dict, intro: str) -> str | None:
     rows = v.get("rows") or []
     hl = v.get("highlights") or {}
@@ -114,12 +125,22 @@ def table_summary(w: Writer, v: dict, meta: dict, intro: str) -> str | None:
         return None
     lines = [intro]
     first = meta.get("metric") or ""
-    items = sorted(hl.items(), key=lambda kv: (first not in kv[0], kv[0] == "totals"))
+    counts = ("best_matches", "best_innings", "best_balls", "most_matches", "most_innings")    # not worth leading with
+    items = sorted(((k, x) for k, x in hl.items() if k not in counts), key=lambda kv: (first not in kv[0], kv[0] == "totals"))
     for k, val in items[:4]:
         if k == "totals" and isinstance(val, dict):
             val = ", ".join(f"{num(x)} {y.replace('_', ' ')}" for y, x in val.items())
-        lines.append(f"- {k.replace('_', ' ').capitalize()}: **{val}**")
-    if not hl:
+        elif isinstance(val, str) and meta.get("split") in SPLIT_LABEL:
+            val = re.sub(r"\((\w+)\)$", lambda m: f"({SPLIT_LABEL[meta['split']](m.group(1))})", val)
+        name = k.replace("true_sr", "true_strike_rate").replace("_pct", " %").replace("_", " ")
+        lines.append(f"- {name.capitalize()}: **{val}**")
+    if not hl and not _label_col(rows[0]):
+        r = rows[0]
+        figs = [f"{k.replace('_', ' ')} **{num(x)}**" for k, x in r.items() if isinstance(x, (int, float))][:5]
+        if not figs:
+            return None
+        lines.append("- " + ", ".join(figs))
+    elif not hl:
         label = _label_col(rows[0])
         metric = _metric_col(rows[0], meta.get("metric"))
         for r in rows[:4]:
@@ -170,7 +191,9 @@ def stats(w, v, meta):
     if metric not in r or r[metric] is None:
         return None
     who = w.name(r.get("player", meta.get("player")))
-    lines = [f"{who}'s {meta['label']}: **{num(r[metric])}** ({w.scope(v)})."]
+    scope = w.scope(v, (meta.get("player"), r.get("player"))) or w.filter_scope(v) or "all cricket"
+    first = f"{who}'s {meta['label']}: **{num(r[metric])}** ({scope})."
+    lines = [first if metric == "highest" else w.pick(first, f"{who}: **{num(r[metric])}** {meta['label']} ({scope}).")]
     ctx = [f"{num(r[k])} {k.replace('_', ' ')}" for k in ("runs", "balls", "average", "strike_rate", "matches")
            if k in r and k != metric and r[k] is not None][:3]
     if ctx:
@@ -198,6 +221,51 @@ def matchup(w, v, meta):
     return "\n".join(lines)
 
 
+def team(w, v, meta):
+    """A team's record: one row of totals (overall or head to head), or a split (season, opponent...)."""
+    rows = v.get("rows") or []
+    if not rows:
+        return None
+    if v.get("highlights") or len(rows) > 1:
+        who = w.name(meta["team"])
+        return table_summary(w, v, meta, f"{who}'s results ({w.filter_scope(v) or 'all cricket'}):")
+    r = rows[0]
+    if r.get("matches") is None:
+        return None
+    vs = f" v {w.name(meta['opposition'])}" if meta.get("opposition") else ""
+    scope = w.filter_scope(v)
+    nr = f", {num(r['no_result'])} no result" if r.get("no_result") else ""
+    lines = [f"{w.name(meta['team'])}{vs}{f' ({scope})' if scope else ''}: **{num(r['matches'])}** matches, "
+             f"**{num(r['won'])}** won, **{num(r['lost'])}** lost{nr} (win rate **{num(r['win_pct'])}%**)."]
+    if r.get("batted_first"):
+        lines.append(f"- Batting first: won {num(r['won_batting_first'])} of {num(r['batted_first'])}")
+    if r.get("chased"):
+        lines.append(f"- Chasing: won {num(r['won_chasing'])} of {num(r['chased'])}")
+    if r.get("tosses_won") is not None:
+        lines.append(f"- Tosses won: {num(r['tosses_won'])}")
+    return "\n".join(lines)
+
+
+def coverage(w, v, meta):
+    rows = v.get("rows") or []
+    if not rows:
+        return None
+    if "known_missing" in rows[0] or "coverage_pct" in rows[0]:          # the summary view
+        want = {"Test": "Tests", "ODI": "ODIs"}.get(meta.get("format"))
+        rows = [r for r in rows if not want or r.get("format") == want] or rows
+        lines = ["What the data holds:"]
+        for r in rows[:6]:
+            cov = f", **{num(r['coverage_pct'])}%** complete ({num(r['known_missing'])} known missing)" if r.get("coverage_pct") is not None else ""
+            lines.append(f"- {r.get('format')} ({'women' if r.get('gender') == 'female' else 'men'}): "
+                         f"**{num(r.get('matches'))}** matches, {str(r.get('first', ''))[:4]}-{str(r.get('last', ''))[:4]}{cov}")
+        return "\n".join(lines)
+    n = next((x.split()[0] for x in v.get("notes") or [] if "known-missing" in x), None)
+    lines = [f"**{n}** known-missing matches:" if n else "Known-missing matches:"]
+    for r in rows[:4]:
+        lines.append(f"- {r.get('date')}: {r.get('team1')} v {r.get('team2')}")
+    return "\n".join(lines)
+
+
 def compare(w, v, meta):
     return table_summary(w, v, meta, w.pick("Side by side ({s}):", "How they compare ({s}):").format(s=w.scope(v) or "all cricket"))
 
@@ -221,7 +289,9 @@ def records(w, v, meta):
     lines = [f"Top of the list ({w.scope(v)}):"]
     for r in rows[:4]:
         who = r.get("player") or r.get("team")
-        what = r.get("runs") or r.get("figures") or r.get("total") or ""
+        what = r.get("score") or r.get("runs") or r.get("figures") or r.get("total")
+        if not what:
+            return None
         lines.append(f"- {w.name(who)}: **{what}** v {r.get('opposition', '?')}, {str(r.get('date', ''))[:4]}")
     return "\n".join(lines)
 
@@ -265,7 +335,9 @@ def sql(w, v, meta):
         return None
     if len(rows) == 1 and len(rows[0]) == 1:
         k, val = next(iter(rows[0].items()))
-        return f"**{num(val)}** {k.replace('_', ' ')} in the data."
+        if not val:
+            return None
+        return f"**{num(val)}** {meta.get('what') or k.replace('_', ' ') + ' in the data'}."
     keys = list(rows[0])
     return "From the database:\n" + "\n".join(f"- {r[keys[0]]}: **{num(r[keys[1]])}**" for r in rows[:5])
 
@@ -293,6 +365,7 @@ def open_view(w, v, meta):
 
 
 WRITERS = {"leaderboard": leaderboard, "profile": profile, "stats": stats, "matchup": matchup, "compare": compare,
+           "team": team, "coverage": coverage,
            "venue": venue, "records": records, "replay": replay, "metrics": metrics, "lookup": lookup, "sql": sql,
            "open": open_view}
 INTROS = {"split": "{n}, broken down ({s}):", "form": "{n}'s form ({s}):", "arc": "The careers side by side ({s}):",
@@ -304,7 +377,9 @@ INTROS = {"split": "{n}, broken down ({s}):", "form": "{n}'s form ({s}):", "arc"
 
 def write(rng: random.Random, kind: str, views: list, meta: dict) -> str | None:
     w = Writer(rng, views)
-    data = [v for v in views if isinstance(v, dict) and "status" not in v]
+    data = [v for v in views if isinstance(v, dict) and "status" not in v and "error" not in v]
+    if meta.get("use_last"):         # a recovery: the answer comes from the call that fixed the first
+        data = data[-1:]
     if kind == "two_scopes":
         return two_scopes(w, data, meta)
     if kind == "chart":
