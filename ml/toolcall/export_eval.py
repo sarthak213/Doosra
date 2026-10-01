@@ -81,7 +81,10 @@ async def computed_facts() -> dict[str, list]:
     pom = db.query("SELECT player_of_match p, COUNT(*) n FROM matches WHERE player_of_match IS NOT NULL "
                    "GROUP BY 1 ORDER BY 2 DESC LIMIT 1")[0]
     players = db.query("SELECT COUNT(DISTINCT player) n FROM players_matches")[0]["n"]
+    run_outs = [db.query(f"SELECT COUNT(*) n FROM deliveries WHERE wicket_kind = 'run out'{w}")[0]["n"]
+                for w in ("", " AND innings_num <= 2")]     # with super overs (the fixture) or without (run_sql's rule)
     return {
+        "q04": [[n(x) for x in run_outs]],
         "q21": [surname(top[1])],
         "q24": [str(avgs[0][1]), str(avgs[1][1])],
         "q25": [str(best[0]), n(best[1])],
@@ -126,7 +129,7 @@ def main() -> None:
     (OUT / "profiles" / "full" / "tools.json").write_text(json.dumps(asyncio.run(full_tools()), indent=1), encoding="utf-8")
     questions = json.loads((ROOT / "backend" / "tests" / "eval_fixtures" / "eval_questions.json").read_text(encoding="utf-8"))["questions"]
     facts = asyncio.run(computed_facts())
-    rows = []
+    graded = []
     for q in questions:
         if q["id"] in MANUAL:
             grade, must = "manual", []
@@ -134,9 +137,9 @@ def main() -> None:
             grade, must = "auto", facts[q["id"]]
         else:
             grade, must = "auto", tokens(q["expected_answer"])
-        rows.append({"id": q["id"], "question": q["question"], "expected": q["expected_answer"], "grade": grade,
+        graded.append({"id": q["id"], "question": q["question"], "expected": q["expected_answer"], "grade": grade,
                      "must_include": must})
-    (OUT / "questions.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    (OUT / "questions.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in graded), encoding="utf-8")
     (OUT / "dataset.json").write_text(json.dumps({
         "name": "Doosra tool calls",
         "answer_tool": {"name": "final_answer", "arg": "answer"},
