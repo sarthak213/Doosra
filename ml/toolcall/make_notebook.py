@@ -33,6 +33,8 @@ Trains a LoRA adapter on [Sarthak213/doosra-toolcalls](https://huggingface.co/da
 1. *Runtime → Change runtime type → **A100 GPU***. The notebook stops at once on anything smaller.
 2. The key icon in the left bar: a secret named `HF_TOKEN` (your Hugging Face **write** token) with notebook access on.
 3. *Runtime → Run all*, and allow Google Drive. About 5.5 hours. Keep the tab open and the computer awake.
+   It can run unattended: when everything is done it disconnects itself, and if nothing progresses for 45 minutes
+   (a failed cell, a hang) it saves its log and disconnects, so an idle GPU doesn't use compute units.
 4. If the session drops: reconnect to an A100 and *Run all* again. Training resumes from its last checkpoint on
    Drive, and exports that already finished are skipped."""),
 ("code", """import os
@@ -74,8 +76,29 @@ WORK = "/content/drive/MyDrive/doosra-train"
 CKPT = f"{WORK}/checkpoints-{RUN}" + ("-smoke" if SMOKE else "")
 os.makedirs(CKPT, exist_ok=True)
 RUN_LOG = {"run": RUN, "gpu": GPU, "config": CFG, "dataset_revision": REVISION,
-           "started": time.strftime("%Y-%m-%d %H:%M:%S"), "events": []}"""),
-("code", """from datasets import load_dataset
+           "started": time.strftime("%Y-%m-%d %H:%M:%S"), "events": []}
+
+# Unattended runs: if nothing makes progress for 45 minutes (a cell failed and stopped "Run all", or something hung),
+# save the log and give the GPU back, so an idle A100 doesn't use compute units all night.
+import threading
+HEARTBEAT = [time.time()]
+def beat():
+    HEARTBEAT[0] = time.time()
+def _watchdog(limit=45 * 60):
+    while True:
+        time.sleep(60)
+        if time.time() - HEARTBEAT[0] > limit:
+            print("No progress for 45 minutes: saving the log and disconnecting to stop using compute units.")
+            try:
+                RUN_LOG["events"].append("watchdog disconnected the runtime " + time.strftime("%H:%M:%S"))
+                json.dump(RUN_LOG, open(f"{WORK}/run_log-{RUN}.json", "w"), indent=1, default=str)
+            finally:
+                from google.colab import runtime
+                runtime.unassign()
+if not SMOKE:
+    threading.Thread(target=_watchdog, daemon=True).start()"""),
+("code", """beat()
+from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 data = load_dataset(DATASET, revision=REVISION)
 TOOLS = json.load(open(hf_hub_download(DATASET, "tools.json", repo_type="dataset", revision=REVISION)))
@@ -84,7 +107,8 @@ assert any(t["function"]["name"] == "run_sql" and "Tables" in t["function"]["des
 if SMOKE:
     data["train"], data["validation"] = data["train"].select(range(64)), data["validation"].select(range(8))
 print(data)"""),
-("code", """from unsloth import FastModel
+("code", """beat()
+from unsloth import FastModel
 model, tokenizer = FastModel.from_pretrained(BASE, max_seq_length=8192, load_in_4bit=False, full_finetuning=False)
 model = FastModel.get_peft_model(
     model, finetune_vision_layers=False, finetune_language_layers=True, finetune_attention_modules=True,
@@ -122,6 +146,7 @@ from unsloth.chat_templates import train_on_responses_only
 
 class TimeBudget(TrainerCallback):
     def on_step_end(self, args, state, control, **kw):
+        beat()
         if time.time() - T_START > HOURS * 3600:
             RUN_LOG["events"].append(f"stopped by the time budget at step {state.global_step}")
             control.should_save, control.should_training_stop = True, True
@@ -182,7 +207,8 @@ except Exception as e:  # the probe is a safeguard; if it can't run here, train 
     model.zero_grad(set_to_none=True); gc.collect(); torch.cuda.empty_cache()
     print("probe skipped:", repr(e)[:200])
 RUN_LOG["batch"] = BATCH"""),
-("code", """resume = bool(glob.glob(f"{CKPT}/checkpoint-*"))
+("code", """beat()
+resume = bool(glob.glob(f"{CKPT}/checkpoint-*"))
 T_START = time.time()
 stats = trainer.train(resume_from_checkpoint=resume)
 RUN_LOG.update(train_seconds=round(time.time() - T_START), resumed=resume, log_history=trainer.state.log_history,
@@ -245,6 +271,7 @@ def _sanity(m, t, label):
     FastModel.for_inference(m)
     rows, per_kind = [], defaultdict(lambda: [0, 0])
     for i in SANITY:
+        beat()
         ex = data["test"][i]
         msgs = chat(ex["messages"][:2])
         gold = ex["messages"][2]["tool_calls"][0]["function"]
@@ -273,9 +300,12 @@ def export(m, processor, repo, log):
         print("already exported:", repo)
         return
     t0 = time.time()
+    beat()
     m.push_to_hub(repo, token=HF_TOKEN)
+    beat()
     getattr(processor, "tokenizer", processor).push_to_hub(repo, token=HF_TOKEN)
     m.push_to_hub_gguf(repo, processor, quantization_method="q4_k_m", token=HF_TOKEN)
+    beat()
     log = {**log, "gguf_seconds": round(time.time() - t0), "finished": time.strftime("%Y-%m-%d %H:%M:%S")}
     path = f"{WORK}/run_log-{repo.split('/')[-1]}.json"
     json.dump(log, open(path, "w"), indent=1, default=str)
@@ -290,6 +320,7 @@ for e in KEEP_EPOCHS:
     path = f"{WORK}/keep-{RUN}-epoch{e}"
     if not os.path.exists(f"{path}/adapter_config.json"):
         print("no epoch", e, "checkpoint was kept"); continue
+    beat()
     del trainer, model; gc.collect(); torch.cuda.empty_cache()
     model, tokenizer = FastModel.from_pretrained(path, max_seq_length=MAX_SEQ, load_in_4bit=False)
     t = getattr(tokenizer, "tokenizer", tokenizer)
@@ -303,7 +334,13 @@ for k, v in RUN_LOG["sanity"].items():
     if "error" not in v:
         print(f"  {k:8} right tool {v['right_tool']:.0%}  exact call {v['exact_call']:.0%}")
 json.dump(RUN_LOG, open(f"{WORK}/run_log-{RUN}.json", "w"), indent=1, default=str)
-print("Done. Disconnect the runtime (Runtime -> Disconnect and delete runtime) to stop using compute units.")"""),
+if SMOKE:
+    print("Smoke run done.")
+else:
+    print("Done: disconnecting the runtime so it stops using compute units (the output above stays in this tab).")
+    time.sleep(5)
+    from google.colab import runtime
+    runtime.unassign()"""),
 ]
 
 
