@@ -25,7 +25,6 @@ First call of 300 conversations, and every step of 100 with the final answer che
 
 | Model | Right tool | Exact arguments | Conversations all right | Answers when it should | Answers fully grounded |
 |---|---:|---:|---:|---:|---:|
+| Qwen3.5 4B (long prompt) | 75% | 42% | 48% | 35% | 70% |
 | v2 at epoch 1 | 100% | 94% | 97% | 100% | 100% |
 | **v2** | 100% | 93% | 96% | 100% | 100% |
-
-_The base 4B on this test set is still being measured._

@@ -52,8 +52,9 @@ def card(name: str, repo: str, log: dict, evaluation: str | None, sessions_note:
     c = log["config"]
     evals = [(h["step"], h["eval_loss"]) for h in log["log_history"] if "eval_loss" in h]
     first, best, last = evals[0], min(evals, key=lambda e: e[1]), evals[-1]
-    epochs, steps = c["epochs"], last[0]
-    length = (f"{steps} steps (the end of epoch 1) of a {epochs}-epoch run" if log.get("stopped_at")
+    epochs, steps = c["epochs"], log.get("stopped_at") or last[0]
+    length = (f"{steps} steps ({'the' if steps == epoch_steps(log) else 'about the'} end of epoch 1) of a {epochs}-epoch run"
+              if log.get("stopped_at")
               else f"{epochs} epoch{'s' if epochs != 1 else ''}, {steps} steps")
     batch = log.get("batch") or 2
     banner = SUPERSEDED.format(v2_url=f"https://huggingface.co/{V2}") if run.get("superseded") else ""
