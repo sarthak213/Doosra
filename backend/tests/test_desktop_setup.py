@@ -46,13 +46,15 @@ class TestSettingsAndHardware:
         desktop_app.save_settings(model="qwen3.5-4b", evil="x")
         assert desktop_app.load_settings()["model"] == "qwen3.5-4b" and "evil" not in desktop_app.load_settings()
 
-    def test_the_recommendation_follows_memory_and_gpu(self):
-        gpu = [{"memory_gb": 16}]
-        assert desktop_app.recommend(32, gpu) == "qwen3.5-9b"
-        assert desktop_app.recommend(16, gpu) == "qwen3.5-9b"
-        assert desktop_app.recommend(16, []) == "qwen3.5-4b"          # 16 GB and no GPU: the small one
-        assert desktop_app.recommend(32, []) == "qwen3.5-9b"          # plenty of memory makes up for no GPU
-        assert desktop_app.recommend(8, gpu) == "qwen3.5-4b"
+    def test_the_fine_tuned_model_is_recommended_everywhere(self):
+        # v3: it beat the 9B in the evaluation, at half the size, so it's the pick on every PC
+        for ram, gpu in ((32, [{"memory_gb": 16}]), (16, []), (8, [])):
+            assert desktop_app.recommend(ram, gpu) == "qwen3.5-4b-doosra"
+
+    def test_only_the_fine_tuned_model_runs_compact(self):
+        assert desktop_app.compact("qwen3.5-4b-doosra")
+        assert not desktop_app.compact("qwen3.5-4b") and not desktop_app.compact("qwen3.5-9b")
+        assert not desktop_app.compact(None) and not desktop_app.compact("gone")
 
     def test_every_listed_model_is_pinned(self):
         for m in desktop_app.REGISTRY:
@@ -74,7 +76,7 @@ class TestRoutes:
     def test_status_describes_the_install(self, desktop):
         s = TestClient(main.app).get("/api/desktop/status").json()
         assert s["desktop"] is True and s["settings"]["engine"] == "builtin"
-        assert {m["id"] for m in s["models"]} == {"qwen3.5-9b", "qwen3.5-4b"} and s["hardware"]["ram_gb"] > 0
+        assert {m["id"] for m in s["models"]} == {"qwen3.5-4b-doosra", "qwen3.5-9b", "qwen3.5-4b"} and s["hardware"]["ram_gb"] > 0
 
     def test_a_model_in_use_cant_be_deleted(self, desktop, monkeypatch):
         (desktop / "models").mkdir(parents=True, exist_ok=True)

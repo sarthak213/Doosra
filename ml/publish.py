@@ -52,6 +52,8 @@ TARGETS = {
     "toolcall-a": ("doosra-qwen3.5-4b-toolcalls-a", "model", OUT / "hf" / "toolcall-model-a"),
     "toolcall-b": ("doosra-qwen3.5-4b-toolcalls-b", "model", OUT / "hf" / "toolcall-model-b"),
     "toolcall-b-step350": ("doosra-qwen3.5-4b-toolcalls-b-step350", "model", OUT / "hf" / "toolcall-model-b-step350"),
+    "toolcall-v2": ("doosra-qwen3.5-4b-toolcalls-v2", "model", OUT / "hf" / "toolcall-model-v2"),
+    "toolcall-v2-epoch1": ("doosra-qwen3.5-4b-toolcalls-v2-epoch1", "model", OUT / "hf" / "toolcall-model-v2-epoch1"),
 }
 
 

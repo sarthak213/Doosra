@@ -211,6 +211,9 @@ TOOLCALL_SESSIONS = {
                  "resumed from the step-150 checkpoint",
     "b": "about 4 hours of A100 time over two sessions (about 20 s a step); the first session disconnected at step 195 "
          "and training resumed from the step-150 checkpoint on Google Drive",
+    "v2": "5.2 hours of training in one A100 session (about 22 s a step at batch 1), then a check on held-out "
+          "questions and the GGUF export; about 31 compute units in all",
+    "v2-epoch1": "the first 419 steps of the v2 run: about 2.6 hours of A100 time",
 }
 
 
@@ -222,10 +225,14 @@ def build_toolcall_model(run: str) -> Path:
     from huggingface_hub import hf_hub_download
     repo = f"Sarthak213/doosra-qwen3.5-4b-toolcalls-{run}"
     log = json.loads(Path(hf_hub_download(repo, "run_log.json", force_download=True)).read_text(encoding="utf-8"))
-    if log.get("exported_from"):          # exported from a saved checkpoint: its training is run B's, up to that step
-        stop = int(log["exported_from"].rsplit("step", 1)[-1])
-        parent = json.loads(Path(hf_hub_download(repo.rsplit("-", 1)[0], "run_log.json")).read_text(encoding="utf-8"))
-        log = {**parent, "stopped_at": stop,
+    if log.get("exported_from"):          # exported from a saved checkpoint: the parent run's training, up to it
+        src = log["exported_from"]
+        parent = log if log.get("log_history") else json.loads(Path(hf_hub_download(
+            repo.rsplit("-", 1)[0], "run_log.json")).read_text(encoding="utf-8"))
+        total = max(h.get("step", 0) for h in parent["log_history"])
+        stop = (int(src.rsplit("step", 1)[-1]) if "step" in src
+                else round(total / parent["config"]["epochs"]) * int(src.rsplit("epoch", 1)[-1]))
+        log = {**parent, "stopped_at": stop, "total_steps": total,
                "log_history": [h for h in parent["log_history"] if h.get("step", 0) <= stop]}
     out = fresh(OUT / f"toolcall-model-{run}")
     model_card.loss_plot(log, out / "training_loss.png")

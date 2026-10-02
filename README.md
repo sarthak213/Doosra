@@ -24,9 +24,11 @@ published as a release the app downloads.
 2. The first launch opens a setup screen. It shows your PC's memory, GPU and free space,
    recommends a model, and downloads once:
    - the cricket database (about 430 MB);
-   - an AI model: **Qwen3.5 9B** (5.6 GB, the best answers; for 16 GB+ of memory, faster with a
-     GPU) or **Qwen3.5 4B** (2.7 GB, for smaller PCs). If LM Studio already has the same file,
-     Doosra can use that copy instead (after checking its checksum).
+   - an AI model: **Qwen3.5 4B Doosra** (2.8 GB, recommended: fine-tuned on Doosra's own tools, the
+     most accurate in our tests and about 2.5x faster than the 9B; see [Models](#models)), or the
+     general **Qwen3.5 9B** (5.6 GB; 16 GB+ of memory, faster with a GPU) or **Qwen3.5 4B** (2.7 GB).
+     If LM Studio already has the same file, Doosra can use that copy instead (after checking its
+     checksum).
 
    Downloads can be stopped and resumed. Then Doosra starts its built-in AI engine, checks it
    answers, and opens.
@@ -419,6 +421,10 @@ answer up; its reasoning is kept as steps in the trace.
 Answers put player and team names and key numbers in bold, use short bullet
 lists, and use a small table when comparing three or more players.
 
+With Qwen3.5 4B Doosra (below) the copilot runs in **compact mode**: a system prompt of
+about 280 tokens instead of 2,100, tool descriptions cut to their first sentence (except
+`run_sql`, which keeps its schema), and reasoning off. The model learned the rest in training.
+
 Local models are slowest at reading the prompt, so the prompt is laid out to
 be reused: the fixed rules and the tool definitions come first and never
 change; project notes, page context and the question come last. After the first
@@ -585,6 +591,27 @@ evaluation matches LightGBM's. Retrain with `pip install -r ml/requirements-ml.t
 
 **The dataset** (`ml/export_dataset.py`): every table as Parquet with a dataset card, for Hugging Face.
 
+**Qwen3.5 4B Doosra** (`ml/toolcall/`; [model](https://huggingface.co/Sarthak213/doosra-qwen3.5-4b-toolcalls-v2),
+[data](https://huggingface.co/datasets/Sarthak213/doosra-toolcalls)): Qwen3.5 4B fine-tuned (LoRA, rank 32, 2
+epochs on a Colab A100) to call Doosra's 25 tools and answer from their results. The training conversations are
+generated, not written: questions from templates over real players, teams, venues and competitions (46% reworded by
+the local 9B), gold tool calls **executed against the database**, answers written from the results, and checks that
+every answer's figures come from its results and that nothing overlaps the evaluation. On Doosra's 40 end-to-end
+questions, through the real tool loop:
+
+| Model | Correct of 40 | Calls per question | Median time | 90th percentile |
+|---|---:|---:|---:|---:|
+| Qwen3.5 4B (full prompt) | 29 | 3.1 | 30 s | 85 s |
+| Qwen3.5 9B (full prompt) | 30 | 2.0 | 27 s | 73 s |
+| Fine-tune v1 (best run) | 21 | 2.0 | 13 s | 26 s |
+| **Qwen3.5 4B Doosra (v2)** | **33** | **1.3** | **11 s** | **17 s** |
+
+The first version aced its own test set and lost end to end; evaluating it showed why (no SQL schema in its tool
+list, answers built on a template's headline figure, no recovery from a failed call, a template bug that left team
+answers without figures), and v2's data fixes each. Generate the data with `python ml/toolcall/generate.py`, check it
+with `ml/toolcall/validate.py`, train with `ml/toolcall/train.ipynb` (one Colab A100 run, about 6 hours), and evaluate
+with ToolEval (`ml/toolcall/export_eval.py` writes its dataset; `eval_mcp.py` serves Doosra's tools to it).
+
 ## Building the Windows app
 
 ```bash
@@ -647,8 +674,6 @@ values computed by independent SQL, checked against the real database.
 - Match Centre (worm, Manhattan, win-probability model, key moments, impact)
 - Matchup grid + auto-written pre-match reports
 - Venue, team and tournament dashboards; a scouting board with league-strength adjustment
-- Tool-use fine-tune of a small local model for speed
-- Single-installer desktop app
 
 ## Licence
 

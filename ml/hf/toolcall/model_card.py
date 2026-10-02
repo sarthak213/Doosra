@@ -1,33 +1,65 @@
 """
-The model card for a fine-tuned Doosra tool-calling model, from its run log (run_log.json in the model repo) and,
-when there is one, its ToolEval results. Used by ml/build_hf.py (build_toolcall_model).
+The model card for a fine-tuned Doosra tool-calling model, from its run log (run_log.json in the model repo) and its
+evaluation (ml/hf/toolcall/evaluation-<run>.md, written by ml/toolcall/eval_report.py from ToolEval's results).
+Used by ml/build_hf.py (build_toolcall_model).
 """
 
 from __future__ import annotations
 
-EPOCH_STEPS = 366          # 5,854 conversations / 16 per step
-
-TITLES = {"a": "Run A", "b": "Run B", "b-step350": "Run B at step 350"}
-
-RUNS = {
-    "a": "rank 16, learning rate 2e-4, 1 epoch",
-    "b": "rank 32, learning rate 1e-4, 2 epochs",
-    "b-step350": "rank 32, learning rate 1e-4, stopped at step 350 of 732: about 1 epoch",
+DATA = {   # the dataset version each run trained on
+    1: dict(n="7,000", train="5,854", valid="306", test="840", kinds=29, reworded="43%",
+            seq="sequences up to 6,144 tokens (4.5% of conversations were cut short at the end, where the answer is; "
+                "fixed in v2)"),
+    2: dict(n="8,000", train="6,695", valid="345", test="960", kinds=31, reworded="46%",
+            seq="sequences up to 7,424 tokens, above the longest conversation"),
 }
 
+V2 = "Sarthak213/doosra-qwen3.5-4b-toolcalls-v2"
 
-def fmt_hours(seconds: float) -> str:
-    return f"{seconds / 3600:.1f} hours"
+RUNS = {
+    "v2": dict(title="v2", data=2, about="rank 32, learning rate 1e-4, 2 epochs, dataset v2; **the model Doosra ships**",
+               story="Unlike v1, validation loss kept falling into the second epoch (v2's broader data had more to "
+                     "learn) and levelled off around step 500. The adapter at the end of epoch 1 was exported too "
+                     "(`…-v2-epoch1`); the two tie on the open questions, and this one is faster and more accurate on "
+                     "the auto-graded ones, so it's the one Doosra ships."),
+    "v2-epoch1": dict(title="v2 at epoch 1", data=2,
+                      about="rank 32, learning rate 1e-4, the v2 run's adapter at the end of epoch 1",
+                      story="Exported from the end of the first epoch (step 419) of the v2 run, as a second candidate "
+                            "from the same training. Doosra ships the end of epoch 2 (`…-v2`)."),
+    "a": dict(title="v1, run A", data=1, about="rank 16, learning rate 2e-4, 1 epoch, dataset v1", superseded=True),
+    "b": dict(title="v1, run B", data=1, about="rank 32, learning rate 1e-4, 2 epochs, dataset v1", superseded=True,
+              story="It levelled off by the end of the first epoch: the second kept lowering the training loss but not "
+                    "the validation loss."),
+    "b-step350": dict(title="v1, run B at step 350", data=1, superseded=True,
+                      about="rank 32, learning rate 1e-4, stopped at step 350 of 732 (about 1 epoch), dataset v1"),
+}
+
+SUPERSEDED = f"""> **Superseded by [v2]({{v2_url}}).** This first version is near-perfect on questions shaped like its training
+> templates but answered fewer open questions right than the base model it started from. The evaluation below shows
+> why, and [v2](https://huggingface.co/{V2}) fixes it. Kept for the comparison.
+
+"""
+
+
+def epoch_steps(log: dict) -> int:
+    total = max(h.get("step", 0) for h in log["log_history"])
+    return round((log.get("total_steps") or total) / max(log["config"]["epochs"], 1))
 
 
 def card(name: str, repo: str, log: dict, evaluation: str | None, sessions_note: str) -> str:
+    run = RUNS.get(name, {"title": name, "data": 2, "about": ""})
+    d = DATA[run["data"]]
     c = log["config"]
     evals = [(h["step"], h["eval_loss"]) for h in log["log_history"] if "eval_loss" in h]
     first, best, last = evals[0], min(evals, key=lambda e: e[1]), evals[-1]
-    epochs = c["epochs"]
-    steps = last[0]
-    length = (f"{steps} steps (about 1 epoch) of a {epochs}-epoch run, exported from its step-{steps} checkpoint"
-              if log.get("stopped_at") else f"{epochs} epoch{'s' if epochs != 1 else ''}, {steps} steps")
+    epochs, steps = c["epochs"], last[0]
+    length = (f"{steps} steps (the end of epoch 1) of a {epochs}-epoch run" if log.get("stopped_at")
+              else f"{epochs} epoch{'s' if epochs != 1 else ''}, {steps} steps")
+    batch = log.get("batch") or 2
+    banner = SUPERSEDED.format(v2_url=f"https://huggingface.co/{V2}") if run.get("superseded") else ""
+    lead = ("In Doosra's evaluation it answers **33 of 40** open questions right, against 30 for Qwen3.5 9B and 29 for "
+            "the base 4B, about **2.5x faster** (see [Evaluation](#evaluation))." if run["data"] == 2 else
+            "See [Evaluation](#evaluation) for how it compares with the base models and v2.")
     return f"""---
 license: apache-2.0
 base_model: Qwen/Qwen3.5-4B
@@ -49,19 +81,18 @@ datasets:
 - Sarthak213/doosra-toolcalls
 ---
 
-# Doosra tool caller: Qwen3.5 4B fine-tuned to use a cricket analytics toolkit ({TITLES.get(name, name)})
+# Doosra tool caller: Qwen3.5 4B fine-tuned to use a cricket analytics toolkit ({run['title']})
 
-[Doosra](https://github.com/sarthak213/Doosra) is a cricket analytics app with a local AI copilot: you ask a question,
+{banner}[Doosra](https://github.com/sarthak213/Doosra) is a cricket analytics app with a local AI copilot: you ask a question,
 and the model answers it by calling Doosra's 25 tools (leaderboards, player profiles, match-ups, venues, records,
 match replays, charts, SQL…) over 11 million balls of [Cricsheet](https://cricsheet.org) data, then writes
 an answer from the results.
 
-Qwen3.5 9B does this well. The 4B, the model for PCs with less memory, picks tools and arguments less reliably.
-This is Qwen3.5 4B **fine-tuned on 5,854 of Doosra's own tool-calling conversations**, so the smaller model can do
-the job, and does it with a **prompt about 8x shorter** (about 280 tokens instead of 2,100, plus compact tool
-schemas), which matters on a laptop where reading the prompt is the slow part.
+This is Qwen3.5 4B **fine-tuned on {d['train']} of Doosra's own tool-calling conversations**, so the small model does
+the job reliably, with a **prompt about 8x shorter** than the app gives general models (about 280 tokens instead
+of 2,100, plus compact tool schemas), which matters on a laptop where reading the prompt is the slow part. {lead}
 
-**{TITLES.get(name, name)}** of the project's comparison ({RUNS.get(name, "")}); see [Evaluation](#evaluation).
+**{run['title']}**: {run['about']}.
 
 ## What it does
 
@@ -86,13 +117,13 @@ the exact call; Doosra runs it, and the answer is written from the result (this 
 | `Qwen3.5-4B.Q4_K_M.gguf` | the merged model, 4-bit (2.8 GB), for llama.cpp and Doosra's built-in engine |
 | `adapter_model.safetensors`, `adapter_config.json` | the LoRA adapter (rank {c['lora_r']}), to apply to `Qwen/Qwen3.5-4B` yourself |
 | `Qwen3.5-4B.BF16-mmproj.gguf` | the base model's vision projector, unchanged (vision wasn't trained or tested) |
-| `run_log.json` | the training run: settings, loss every 5 steps, validation loss every 50, timings |
+| `run_log.json` | the training run: settings, losses, timings |
 | `training_loss.png` | the loss curves |
 
 ## Use
 
-**In Doosra:** Settings → AI model → *Qwen3.5 4B Doosra* (from Doosra 3.0). The app sends the short prompt and
-compact tools this model was trained with.
+**In Doosra** (3.0 and later): Settings → AI model → *Qwen3.5 4B Doosra*. The app sends the short prompt and compact
+tools this model was trained with.
 
 **With llama.cpp** (any OpenAI-compatible client). The model emits tool calls; your code runs the tools. Give it
 the system prompt and tool list it was trained with, from the dataset, with thinking off:
@@ -123,12 +154,12 @@ Send each tool's result back as a `tool` message and call again; the model finis
 
 ## Training
 
-**Data:** [Sarthak213/doosra-toolcalls](https://huggingface.co/datasets/Sarthak213/doosra-toolcalls): 7,000
-conversations (5,854 train, 306 validation, 840 test) covering all the tools across 29 kinds of question, single
-calls and multi-step ones (a table then a chart; a player in two scopes). Questions come from templates over real
-players, teams, venues and competitions, and 43% were reworded by Qwen3.5 9B; every tool call was **executed against
-the real database**, and every answer was written from the results. About 15% of players, teams and venues appear
-**only in the test split**, so the test measures names the model never saw.
+**Data:** [Sarthak213/doosra-toolcalls](https://huggingface.co/datasets/Sarthak213/doosra-toolcalls), version
+{run['data']}: {d['n']} conversations ({d['train']} train, {d['valid']} validation, {d['test']} test) across {d['kinds']}
+kinds of question, single calls and multi-step ones. Questions come from templates over real players, teams, venues
+and competitions, and {d['reworded']} were reworded by Qwen3.5 9B; every tool call was **executed against the real
+database**, and every answer was written from the results. About 15% of players, teams and venues appear **only in
+the test split**, so the test measures names the model never saw.{" Version 2 adds single-figure questions, about 20 SQL patterns, recovery from a failed call, fixed answer templates, and keeps the end-to-end evaluation's players, grounds and facts out of training (see the dataset card)." if run['data'] == 2 else ""}
 
 **Method:** LoRA on `unsloth/Qwen3.5-4B` with [Unsloth](https://github.com/unslothai/unsloth) and TRL, on the
 language layers (attention and MLP; vision layers frozen), loss on the assistant's turns only (tool calls and
@@ -140,25 +171,19 @@ list and thinking off, exactly as the app sends them.
 | LoRA | rank {c['lora_r']}, alpha {c['lora_alpha']}, dropout 0, all attention and MLP projections ({64_929_792 if c['lora_r'] == 32 else 32_464_896:,} trainable parameters) |
 | Base weights | 16-bit (bfloat16), not 4-bit QLoRA |
 | Optimiser | AdamW 8-bit, learning rate {c['learning_rate']:g}, cosine schedule, 5 warm-up steps, weight decay 0.01 |
-| Batch | 16 conversations per step ({log.get('batch', 2)} × {16 // (log.get('batch') or 2)} accumulation), sequences up to 6,144 tokens |
+| Batch | 16 conversations per step ({batch} × {16 // batch} accumulation), {d['seq']} |
 | Length | {length} |
-| Hardware | Google Colab, {log['gpu']}, peak memory {log.get('peak_memory_gb', '?')} GB |
+| Hardware | Google Colab, {log['gpu']} (40 GB) |
 | Time | {sessions_note} |
 
 ![Loss curves](training_loss.png)
 
 Validation loss fell from {first[1]:.3f} (step {first[0]}) to {best[1]:.4f} (step {best[0]}) and ended at {last[1]:.4f}.
-{"It levelled off by the end of the first epoch (step " + str(EPOCH_STEPS) + "): the second epoch kept lowering the training loss but not the validation loss, so it fitted the training conversations more closely without doing better on new ones. The project's run A trains for one epoch, and a step-350 copy of this run is kept to test the difference." if epochs >= 2 and not log.get("stopped_at") else ""}
+{run.get('story', '')}
 
 ## Evaluation
 
-{evaluation or '''Being measured with ToolEval, a local evaluation app, against the base 4B and 9B: the first call on
-all 840 held-out test conversations (right tool, right arguments), every step of 100 conversations with their final
-answers checked against the tool results, and 40 open questions end to end through Doosra's real tools. Results
-will be added here.
-
-Spot check on three held-out test questions (unseen players and competitions): all three calls exact; the base 4B got
-one wrong (the example above).'''}
+{evaluation or "Being measured; results will be added here."}
 
 ## Limitations
 
@@ -185,13 +210,15 @@ def loss_plot(log: dict, path) -> None:
     import matplotlib.pyplot as plt
     train = [(h["step"], h["loss"]) for h in log["log_history"] if "loss" in h]
     val = [(h["step"], h["eval_loss"]) for h in log["log_history"] if "eval_loss" in h]
+    every = val[1][0] - val[0][0] if len(val) > 1 else 50
     fig, ax = plt.subplots(figsize=(8, 4.2), dpi=150)
     ax.plot(*zip(*train), color="#2a78d6", linewidth=1.4, label="training (every 5 steps)")
-    ax.plot(*zip(*val), color="#eb6834", linewidth=2, marker="o", markersize=4, label="validation (every 50 steps)")
+    ax.plot(*zip(*val), color="#eb6834", linewidth=2, marker="o", markersize=4, label=f"validation (every {every} steps)")
     ax.set_yscale("log")
-    if max(s for s, _ in train) > EPOCH_STEPS:
-        ax.axvline(EPOCH_STEPS, color="#7c7b76", linestyle="--", linewidth=1)
-        ax.text(EPOCH_STEPS + 6, ax.get_ylim()[1] * 0.6, "end of epoch 1", color="#52514e", fontsize=9)
+    end1 = epoch_steps(log)
+    if max(s for s, _ in train) > end1:
+        ax.axvline(end1, color="#7c7b76", linestyle="--", linewidth=1)
+        ax.text(end1 + 6, ax.get_ylim()[1] * 0.6, "end of epoch 1", color="#52514e", fontsize=9)
     ax.set(xlabel="step (16 conversations each)", ylabel="loss (log scale)")
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(axis="y", color="#e1e0da", linewidth=0.8)
