@@ -1,6 +1,19 @@
 {
-  "_comment": "Models the desktop app can download. Files are pinned by sha256 (from the Hugging Face repo's file list); both are Apache-2.0 Qwen weights, packaged as GGUF by LM Studio's community repo. Bump file and sha256 together.",
+  "_comment": "Models the desktop app can download. Files are pinned by sha256 (from the Hugging Face repo's file list); all are Apache-2.0 Qwen weights. The two base models are packaged as GGUF by LM Studio's community repo; the Doosra model is fine-tuned on Doosra's own tool calls (ml/toolcall/) and runs with the short prompt it was trained on (compact). Bump file and sha256 together.",
   "models": [
+    {
+      "id": "qwen3.5-4b-doosra",
+      "label": "Qwen3.5 4B Doosra",
+      "quant": "Q4_K_M",
+      "repo": "Sarthak213/doosra-qwen3.5-4b-toolcalls-v2",
+      "file": "Qwen3.5-4B.Q4_K_M.gguf",
+      "size_bytes": 2783446720,
+      "sha256": "317e66f16ee101b0ee4e1fc6f2f5d51ed219e67fc0849d46169c0dac32507dbe",
+      "min_ram_gb": 8,
+      "compact": true,
+      "note": "Recommended. Trained on Doosra's tools: the most accurate in our tests (33 of 40, the 9B 30) and about 2.5x faster.",
+      "license": "Apache-2.0"
+    },
     {
       "id": "qwen3.5-9b",
       "label": "Qwen3.5 9B",
@@ -10,7 +23,7 @@
       "size_bytes": 5627044256,
       "sha256": "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
       "min_ram_gb": 16,
-      "note": "The best answers. Needs 16 GB of memory; a GPU makes it much faster.",
+      "note": "A larger general model, for questions far outside Doosra's tools. Needs 16 GB of memory; a GPU makes it much faster.",
       "license": "Apache-2.0"
     },
     {
@@ -22,7 +35,7 @@
       "size_bytes": 2710000000,
       "sha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
       "min_ram_gb": 8,
-      "note": "Faster and lighter, for PCs with less memory. Picks tools less reliably.",
+      "note": "The plain 4B, without Doosra's training. Picks tools less reliably.",
       "license": "Apache-2.0"
     }
   ]

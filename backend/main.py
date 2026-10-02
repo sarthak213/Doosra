@@ -77,8 +77,10 @@ async def lifespan(app: FastAPI):
         setup_job.apply_on_startup()
     # Or a model given directly (a dev run of the built-in engine).
     elif graph.PROVIDER == "llamacpp" and os.environ.get("DOOSRA_MODEL"):
+        # DOOSRA_COMPACT=1 for the fine-tuned model, which runs with the short prompt it was trained on
         local_llm.start_in_background(Path(os.environ["DOOSRA_MODEL"]), os.environ.get("DOOSRA_ENGINE_MODE"),
-                                      on_ready=lambda e: graph.configure("llamacpp", base_url=e.base_url))
+                                      on_ready=lambda e: graph.configure(
+                                          "llamacpp", base_url=e.base_url, compact=os.environ.get("DOOSRA_COMPACT") == "1"))
     try:
         if serves_ui():        # the MCP endpoint has no sign-in and shares the root path with the app, so it's off here
             yield

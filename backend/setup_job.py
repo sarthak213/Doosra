@@ -160,7 +160,7 @@ def _engine(step: Step, path) -> None:
     settings = desktop_app.load_settings()
     mode = local_llm.ENGINE.start(path, settings.get("engine_mode"), settings.get("ctx_size") or local_llm.CTX_SIZE)
     desktop_app.save_settings(engine="builtin", engine_mode=mode)
-    graph.configure("llamacpp", base_url=local_llm.ENGINE.base_url)
+    graph.configure("llamacpp", base_url=local_llm.ENGINE.base_url, compact=desktop_app.compact(settings.get("model")))
     step.state = "done"
     step.detail = {"vulkan": "Running on the GPU", "vulkan-nocoopmat": "Running on the GPU (compatibility mode)",
                    "cpu": "Running on the CPU (no usable GPU found)"}[mode]
@@ -214,7 +214,8 @@ def apply_on_startup() -> None:
     model = settings.get("model")
     if model and desktop_app.model_path(model, settings).exists():
         local_llm.start_in_background(desktop_app.model_path(model, settings), settings.get("engine_mode"),
-                                      on_ready=lambda e: graph.configure("llamacpp", base_url=e.base_url))
+                                      on_ready=lambda e: graph.configure("llamacpp", base_url=e.base_url,
+                                                                         compact=desktop_app.compact(model)))
 
 
 def ready() -> bool:

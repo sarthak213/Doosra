@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { apiGet, apiSend } from "../api.js";
 import Panel, { ErrorNote, Loading } from "../components/kit/Panel.jsx";
+import { saveFile } from "../components/kit/saveFile.js";
 import { useCopilotContext } from "../copilot/CopilotProvider.jsx";
 import { CHATS_CHANGED } from "../hooks/useAgentQuery.js";
 import { useFetch } from "../hooks/useFetch.js";
@@ -85,12 +86,10 @@ export default function ProjectPage() {
     if (!window.confirm(`Delete "${project.name}", its notes and boards? Its chats are kept.`)) return;
     apiSend(`/api/projects/${projectId}`, undefined, "DELETE").then(() => { announce(); navigate("/ask"); }).catch((e) => setStatus(e.message));
   };
-  const exportProject = () => apiGet(`/api/projects/${projectId}/export`).then((data) => {
-    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
-    const a = Object.assign(document.createElement("a"), { href: url, download: `${project.name.replace(/[^\w-]+/g, "_")}.doosra.json` });
-    a.click();
-    URL.revokeObjectURL(url);
-  }).catch((e) => setStatus(e.message));
+  const exportProject = () => apiGet(`/api/projects/${projectId}/export`)
+    .then((data) => saveFile(`${project.name.replace(/[^\w-]+/g, "_")}.doosra.json`, JSON.stringify(data, null, 2), "application/json"))
+    .then((saved) => saved && setStatus("Project exported."))
+    .catch((e) => setStatus(e.message));
   const newBoard = () => apiSend("/api/boards", { name: "Untitled board", project_id: projectId })
     .then((b) => { announce(); navigate(`/boards/${b.id}`); }).catch((e) => setStatus(e.message));
 

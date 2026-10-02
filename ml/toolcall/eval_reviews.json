@@ -1,0 +1,111 @@
+{
+ "truth": {
+  "q22": "SP Narine, economy 7.25 (death overs = 16-20 in Doosra; qualification at least 161 balls)",
+  "q23": "AU Rashid (Adil Rashid), 169 wickets in men's T20Is in the data (Afghanistan, so Rashid Khan, isn't in Cricsheet)",
+  "q26": "BC Lara, 67.87 (31 innings in the data, which starts in 2001)",
+  "q35": "8.54 wide balls per T20 match (10.28 runs from wides), 14,594 matches",
+  "q36": "MS Dhoni, 608 catches in men's internationals (248 Test + 308 ODI + 52 T20I); 766 counts all men's cricket"
+ },
+ "verdicts": {
+  "base-4b": {
+   "q22": false,
+   "q23": true,
+   "q26": false,
+   "q35": false,
+   "q36": false
+  },
+  "base-9b": {
+   "q22": true,
+   "q23": true,
+   "q26": false,
+   "q35": false,
+   "q36": true
+  },
+  "ft-a": {
+   "q22": true,
+   "q23": true,
+   "q26": false,
+   "q35": false,
+   "q36": false
+  },
+  "ft-b-350": {
+   "q22": true,
+   "q23": true,
+   "q26": false,
+   "q35": false,
+   "q36": false
+  },
+  "ft-b": {
+   "q22": true,
+   "q23": true,
+   "q26": false,
+   "q35": false,
+   "q36": false
+  },
+  "ft-v2-epoch1": {
+   "q22": true,
+   "q23": true,
+   "q26": true,
+   "q35": false,
+   "q36": false
+  },
+  "ft-v2": {
+   "q22": true,
+   "q23": true,
+   "q26": false,
+   "q35": false,
+   "q36": false
+  }
+ },
+ "reasons": {
+  "base-4b": {
+   "q22": "no answer (10 repeated calls)",
+   "q23": "Rashid 169",
+   "q26": "no answer",
+   "q35": "no answer",
+   "q36": "766 = all men's cricket, not internationals"
+  },
+  "base-9b": {
+   "q22": "Narine 7.25",
+   "q23": "Adil Rashid 169",
+   "q26": "no answer",
+   "q35": "no answer",
+   "q36": "Dhoni 608 internationals"
+  },
+  "ft-a": {
+   "q22": "Narine 7.25",
+   "q23": "Rashid 169",
+   "q26": "Lara 170.2 with an innings=1 filter",
+   "q35": "no answer (invented columns)",
+   "q36": "766 = all men's cricket"
+  },
+  "ft-b-350": {
+   "q22": "Narine 7.25",
+   "q23": "Rashid 169",
+   "q26": "Patterson 144 at 20 balls",
+   "q35": "a batting-average leaderboard",
+   "q36": "Watling 268 in Tests only"
+  },
+  "ft-b": {
+   "q22": "Narine 7.25",
+   "q23": "Rashid 169",
+   "q26": "Dinusha 86.57 at 400 balls",
+   "q35": "a batting-average leaderboard",
+   "q36": "Watling 268 in Tests only"
+  },
+  "ft-v2-epoch1": {
+   "q22": "Narine 7.25",
+   "q23": "Rashid 169",
+   "q26": "Lara 67.87 (default qualification happened to match)",
+   "q35": "no answer (invented column)",
+   "q36": "Root 283 Test dismissals"
+  },
+  "ft-v2": {
+   "q22": "Narine 7.25",
+   "q23": "Rashid 169",
+   "q26": "no answer (min_innings isn't a filter; 10 repeats)",
+   "q35": "2,441,478 (counted all deliveries)",
+   "q36": "766 = all men's cricket"
+  }
+ }
+}

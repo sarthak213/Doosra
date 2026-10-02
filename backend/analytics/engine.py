@@ -264,13 +264,16 @@ SELECT * FROM (SELECT *, MAX(_balls) OVER () AS _max_balls FROM ({sql}) q) x
                      "(10% of the busiest player in this scope, min 30) -- set min_balls to change it.")
 
     label = [m.label for m in ms]
+    # the split's column, renamed when a metric has the same id (split_by="innings" next to the innings count would
+    # otherwise collide, and the split labels were lost when the table became records)
+    dim = (f"{split_by}_no" if split_by in {m.id for m in ms} else split_by) if split_by else None
     if split_by and names and len(names) == 1:
         rows = _order_keys(rows, split_by)
         keys = season_labels(rows) if split_by == "season" else [r["k"] for r in rows]
-        cols = [split_by] + [m.id for m in ms]
+        cols = [dim] + [m.id for m in ms]
         table = [[k] + _values(r, ms) for k, r in zip(keys, rows)]
         title = _title(f"{role.capitalize()} — {names[0]} by {registry.DIMENSIONS[split_by]['label'].lower()}", scope)
-        hl = highlights(cols, table, split_by, [(m.id, "max" if m.higher_is_better else "min") for m in ms
+        hl = highlights(cols, table, dim, [(m.id, "max" if m.higher_is_better else "min") for m in ms
                                                   if m.kind != "text" and m.id not in ("matches", "innings", "balls")],
                         rate_metrics={m.id for m in ms if m.rate}, totals=("runs", "wickets"))
         return result(title, cols, table, scope, notes, labels=label, player=names[0], highlights=hl)
@@ -287,14 +290,14 @@ SELECT * FROM (SELECT *, MAX(_balls) OVER () AS _max_balls FROM ({sql}) q) x
                     table.append([n] + [None] * len(ms))
                 elif r is not None:
                     table.append([n] + ([k] if split_by else []) + _values(r, ms))
-        cols = ["player"] + ([split_by] if split_by else []) + [m.id for m in ms]
+        cols = ["player"] + ([dim] if split_by else []) + [m.id for m in ms]
         title = _title(f"{role.capitalize()} — {names[0]}" if len(names) == 1 else f"{role.capitalize()} comparison", scope)
         hl = highlights(cols, table, "player", [(m.id, "max" if m.higher_is_better else "min") for m in ms
                                                  if m.kind != "text"], rate_metrics={m.id for m in ms if m.rate}) \
             if not split_by else {}
         return result(title, cols, table, scope, notes, labels=label, highlights=hl)
 
-    cols = ["rank", "player", "team"] + ([split_by] if split_by else []) + [m.id for m in ms]
+    cols = ["rank", "player", "team"] + ([dim] if split_by else []) + [m.id for m in ms]
     table = [[i + 1, r["player"], r["_team"]] + ([r["k"]] if split_by else []) + _values(r, ms)
              for i, r in enumerate(rows)]
     sort_label = sort.label.lower() if sort else "innings"

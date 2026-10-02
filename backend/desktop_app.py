@@ -59,6 +59,14 @@ def model_info(model_id: str) -> dict:
     raise KeyError(f"Unknown model '{model_id}'")
 
 
+def compact(model_id: str | None) -> bool:
+    """Whether a model runs with the short prompt and tool list it was fine-tuned on (agent.graph COMPACT)."""
+    try:
+        return bool(model_id) and bool(model_info(model_id).get("compact"))
+    except KeyError:
+        return False
+
+
 def model_path(model_id: str, settings: dict | None = None) -> Path:
     """Where the model file is: a file the user pointed us at (e.g. LM Studio's copy), or our folder."""
     settings = settings or load_settings()
@@ -127,10 +135,10 @@ def hardware() -> dict:
 
 
 def recommend(ram_gb: float, gpu_list: list[dict]) -> str:
-    """The 9B needs about 16 GB of memory to run comfortably; a GPU with 8 GB+ makes it quick.
-    Anything smaller gets the 4B."""
-    best_gpu = max((g["memory_gb"] for g in gpu_list), default=0)
-    return "qwen3.5-9b" if ram_gb >= 15 and (best_gpu >= 8 or ram_gb >= 24) else "qwen3.5-4b"
+    """Doosra's fine-tuned 4B on every PC: in the v3 evaluation it answered more questions right than the 9B
+    (33 of 40 against 30), at half the size and about 2.5x the speed (ml/toolcall/, model card). The 9B is still
+    offered, for questions far outside Doosra's tools."""
+    return "qwen3.5-4b-doosra"
 
 
 # -- LM Studio, if the user already has it ---------------------------------------------

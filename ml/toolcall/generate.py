@@ -1,0 +1,242 @@
+"""
+Build the tool-calling training data: sample questions (intents.py), run their gold tool calls against the
+database exactly as the Doosra agent does, and write each as a chat conversation the fine-tuned model
+learns from:
+
+    system (the short prompt)  ->  user question  ->  assistant tool call(s)  ->  tool result(s)  ->  ...
+    ->  assistant final_answer (written from the results by answers.py)
+
+    python ml/toolcall/generate.py --n 6000              # ml/out/toolcall/{train,validation,test}.jsonl
+    python ml/toolcall/generate.py --dump 1              # one example per intent, with the raw results
+
+Calls that error or return nothing are dropped, so every example is grounded in real data. The test split
+uses only held-out players, teams and venues (entities.py); train and validation never contain them.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import datetime as dt
+import json
+import random
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT / "backend"))
+
+from mcp.shared.memory import create_connected_server_and_client_session  # noqa: E402
+
+import answers  # noqa: E402
+import entities  # noqa: E402
+import intents  # noqa: E402
+from agent import graph, prompts  # noqa: E402
+from analytics import catalog  # noqa: E402
+
+OUT = ROOT / "ml" / "out" / "toolcall"
+
+# Kept out of training so the end-to-end evaluation (backend/tests/eval_fixtures/eval_questions.json) measures
+# skill, not memory: the players and grounds its questions are about, and calls that fetch the same facts.
+EVAL_PLAYERS = {"Virat Kohli", "V Kohli", "Rohit Sharma", "RG Sharma", "Lasith Malinga", "SL Malinga",
+                "Sachin Tendulkar", "SR Tendulkar", "David Warner", "DA Warner", "Rashid Khan"}
+EVAL_VENUES = {"Dubai International Cricket Stadium", "Eden Gardens"}
+EVAL_PAIRS = [{"India", "Australia"}, {"India", "Pakistan"}]
+IPL = "Indian Premier League"
+
+
+def _eval_fact(name: str, args: dict) -> bool:
+    """True when a call fetches a fact one of the evaluation questions asks for."""
+    f = args.get("filters") or {}
+    extra = {k for k in f if k not in ("competition", "format", "gender")}
+    if name == "leaderboard" and not extra - {"phase"}:
+        m, comp, fmt = args.get("metric"), f.get("competition"), f.get("format")
+        if ((comp == IPL and m == "runs" and not extra) or (comp == IPL and m == "economy" and f.get("phase") == "death")
+                or (fmt == "T20I" and m == "wickets" and f.get("gender", "male") == "male" and not extra)
+                or (fmt == "Test" and m == "average" and not extra)
+                or (comp == "ICC Men's T20 World Cup" and m == "wickets" and not extra)):
+            return True
+    if name == "records" and f.get("competition") == IPL and args.get("kind") == "team_total":
+        return True
+    if name == "team_record" and {args.get("team"), args.get("opposition")} in EVAL_PAIRS:
+        return True
+    if name == "run_sql":
+        q = " ".join(args.get("query", "").split())
+        if q in EVAL_SQL or ("event_name = 'Indian Premier League'" in q and "COUNT(*)" in q):
+            return True
+    return False
+
+
+EVAL_SQL = {   # dataset-wide counts the evaluation asks for (q01-q04, q20, q30)
+    "SELECT COUNT(*) AS matches FROM matches", "SELECT COUNT(*) AS deliveries FROM deliveries",
+    "SELECT COUNT(DISTINCT event_name) AS competitions FROM matches",
+    "SELECT COUNT(*) AS run_outs FROM deliveries WHERE wicket_kind = 'run out' AND innings_num <= 2",
+    "SELECT COUNT(*) AS matches FROM matches WHERE gender = 'female'",
+    "SELECT wicket_kind, COUNT(*) AS dismissals FROM deliveries WHERE is_wicket AND innings_num <= 2 GROUP BY 1 ORDER BY 2 DESC LIMIT 5",
+}
+
+
+def eval_overlap(ex) -> bool:
+    text = ex.question
+    if any(p in text for p in EVAL_PLAYERS) or any(v in text for v in EVAL_VENUES):
+        return True
+    for name, args in ex.calls:
+        flat = json.dumps(args)
+        if any(f'"{p}"' in flat for p in EVAL_PLAYERS) or any(v in flat for v in EVAL_VENUES) or _eval_fact(name, args):
+            return True
+    return False
+
+
+def system_prompt() -> str:
+    cat = catalog.get_catalog()
+    return prompts.build_compact_prompt(cat.date_min, cat.date_max, dt.date.today().isoformat())
+
+
+async def tool_list(session) -> list[dict]:
+    listed = await session.list_tools()
+    full = graph.mcp_tools_to_openai(listed.tools) + graph.LOCAL_TOOLS + [graph.FINAL_ANSWER]
+    return graph.compact_tools(full)
+
+
+def empty(output) -> bool:
+    if not isinstance(output, dict):
+        return not output
+    if output.get("error") or output.get("empty"):
+        return True
+    return "rows" in output and not output["rows"]
+
+
+async def run_calls(session, schemas: dict, calls: list[tuple[str, dict]], expect: dict | None = None):
+    """Execute gold calls the way agent.graph.tools_node does. Returns [(name, args, model_view)] or None
+    if a call fails or returns nothing. A call the example expects to fail (expect[i] == "error") must fail,
+    and its error is what the model sees, as in the app."""
+    expect = expect or {}
+    tables: dict = {}
+    done = []
+    for i, (name, args) in enumerate(calls):
+        args = graph._clean_args(name, args, schemas.get(name))
+        if name == "plot_chart":
+            output = graph._build_chart(args, tables)
+            if "error" in output:
+                return None
+            view = {"status": "chart shown to the user"}
+        elif name == "open_in_app":
+            view = {"status": f"opened the {args['view']} view"}
+        else:
+            try:
+                output = await asyncio.wait_for(graph._call_mcp(session, name, args), timeout=60)
+            except Exception:  # noqa: BLE001 - a failing call just drops the example
+                return None
+            if expect.get(i) == "error":
+                if not (isinstance(output, dict) and output.get("error")):
+                    return None                  # meant to fail and didn't: not a recovery example
+                done.append((name, args, output))
+                continue
+            if empty(output):
+                return None
+            ids = []
+            for t in graph._nested_tables(output):
+                tid = f"T{len(tables) + 1}"
+                tables[tid] = t
+                ids.append(tid)
+            view = graph._for_model(name, output, ids)
+        done.append((name, args, view))
+    return done
+
+
+def conversation(system: str, question: str, results: list, answer: str) -> list[dict]:
+    msgs = [{"role": "system", "content": system}, {"role": "user", "content": question}]
+    for i, (name, args, view) in enumerate(results):
+        cid = f"call_{i + 1}"
+        msgs.append({"role": "assistant", "content": None, "tool_calls": [
+            {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]})
+        msgs.append({"role": "tool", "tool_call_id": cid, "name": name, "content": json.dumps(view, default=str)})
+    msgs.append({"role": "assistant", "content": None, "tool_calls": [
+        {"id": f"call_{len(results) + 1}", "type": "function",
+         "function": {"name": "final_answer", "arguments": json.dumps({"answer": answer})}}]})
+    return msgs
+
+
+async def dump(per_intent: int) -> None:
+    from mcp_server.server import mcp
+    pools = entities.load().split(False)
+    rng = random.Random(1)
+    async with create_connected_server_and_client_session(mcp) as session:
+        tools = await tool_list(session)
+        schemas = {t["function"]["name"]: t["function"]["parameters"] for t in tools}
+        for name, (fn, _) in intents.INTENTS.items():
+            got = 0
+            for _ in range(20):
+                ex = fn(rng, pools)
+                if not ex:
+                    continue
+                res = await run_calls(session, schemas, ex.calls, ex.expect)
+                if not res:
+                    continue
+                print(f"\n===== {name}: {ex.question}")
+                for call, args, view in res:
+                    print(f"--> {call}({json.dumps(args)})\n{json.dumps(view, default=str)[:700]}")
+                got += 1
+                if got >= per_intent:
+                    break
+
+
+async def generate(n: int, seed: int = 7, test_share: float = 0.12, valid_share: float = 0.05) -> dict:
+    """n examples in all: test ones from held-out entities, the rest split into train and validation."""
+    from mcp_server.server import mcp
+    all_pools = entities.load()
+    pools = {"train": all_pools.split(False), "test": all_pools.split(True)}
+    rng = random.Random(seed)
+    system = system_prompt()
+    OUT.mkdir(parents=True, exist_ok=True)
+    files = {k: open(OUT / f"{k}.jsonl", "w", encoding="utf-8") for k in ("train", "validation", "test")}
+    counts = {k: 0 for k in files}
+    by_intent: dict[str, int] = {}
+    seen: set[str] = set()
+    tried = 0
+    async with create_connected_server_and_client_session(mcp) as session:
+        tools = await tool_list(session)
+        schemas = {t["function"]["name"]: t["function"]["parameters"] for t in tools}
+        (OUT / "tools.json").write_text(json.dumps(tools, indent=1), encoding="utf-8")
+        (OUT / "system_prompt.txt").write_text(system, encoding="utf-8")
+        target_test = int(n * test_share)
+        while sum(counts.values()) < n and tried < n * 6:
+            tried += 1
+            split = "test" if counts["test"] < target_test and rng.random() < test_share * 1.5 else "train"
+            ex = intents.sample(rng, pools[split])
+            if not ex or ex.question in seen or eval_overlap(ex):
+                continue
+            res = await run_calls(session, schemas, ex.calls, ex.expect)
+            if not res:
+                continue
+            answer = answers.write(rng, ex.kind, [v for _, _, v in res], ex.meta)
+            if not answer:
+                continue
+            seen.add(ex.question)
+            if split == "train" and rng.random() < valid_share:
+                split = "validation"
+            record = {"id": f"{split[:2]}{counts[split]:05d}", "intent": ex.intent, "question": ex.question,
+                      "messages": conversation(system, ex.question, res, answer)}
+            files[split].write(json.dumps(record, ensure_ascii=False) + "\n")
+            counts[split] += 1
+            by_intent[ex.intent] = by_intent.get(ex.intent, 0) + 1
+            if sum(counts.values()) % 250 == 0:
+                print(f"  {sum(counts.values()):,} examples ({counts}) from {tried:,} tries", flush=True)
+    for f in files.values():
+        f.close()
+    stats = {"counts": counts, "tried": tried, "by_intent": dict(sorted(by_intent.items(), key=lambda kv: -kv[1]))}
+    (OUT / "stats.json").write_text(json.dumps(stats, indent=1), encoding="utf-8")
+    return stats
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dump", type=int, help="print N examples per intent with their results")
+    parser.add_argument("--n", type=int, default=6000)
+    a = parser.parse_args()
+    if a.dump:
+        asyncio.run(dump(a.dump))
+    else:
+        print(json.dumps(asyncio.run(generate(a.n)), indent=1))

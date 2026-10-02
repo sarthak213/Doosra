@@ -174,6 +174,75 @@ def build_ball_outcome() -> Path:
     return out
 
 
+def build_toolcall_data() -> Path:
+    """The tool-calling dataset repo: the three splits, the tool list and system prompt, and the card."""
+    src, out = ROOT / "ml" / "out" / "toolcall", fresh(OUT / "toolcall-data")
+    for f in ("tools.json", "system_prompt.txt"):
+        shutil.copy(src / f, out / f)
+    keys = ("role", "content", "tool_calls", "tool_call_id", "name")
+    for split in ("train", "validation", "test"):
+        # every message with the same keys (null where absent), so datasets infers one schema for all rows
+        rows = []
+        for line in (src / f"{split}.jsonl").read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            r["messages"] = [{k: m.get(k) for k in keys} for m in r["messages"]]
+            r.setdefault("original_question", None)
+            r.pop("paraphrased", None)
+            rows.append(json.dumps(r, ensure_ascii=False))
+        (out / f"{split}.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    counts = {s: len((src / f"{s}.jsonl").read_text(encoding="utf-8").splitlines()) for s in ("train", "validation", "test")}
+    intents, para = {}, 0
+    for s in counts:
+        for line in (src / f"{s}.jsonl").read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            intents[r["intent"]] = intents.get(r["intent"], 0) + 1
+            para += "original_question" in r
+    card = (ROOT / "ml" / "hf" / "toolcall" / "dataset_card.md").read_text(encoding="utf-8")
+    (out / "README.md").write_text(card.format(
+        total=sum(counts.values()), **counts, paraphrased_share=para / sum(counts.values()),
+        intent_rows="\n".join(f"| {k} | {v:,} |" for k, v in sorted(intents.items(), key=lambda kv: -kv[1]))),
+        encoding="utf-8")
+    return out
+
+
+TOOLCALL_SESSIONS = {
+    "a": "2.1 hours in one A100 session (21 s a step)",
+    "b-step350": "the first 350 steps of run B: about 2 hours of A100 time, including a disconnect at step 195 that "
+                 "resumed from the step-150 checkpoint",
+    "b": "about 4 hours of A100 time over two sessions (about 20 s a step); the first session disconnected at step 195 "
+         "and training resumed from the step-150 checkpoint on Google Drive",
+    "v2": "5.2 hours of training in one A100 session (about 22 s a step at batch 1), then a check on held-out "
+          "questions and the GGUF export; about 31 compute units in all",
+    "v2-epoch1": "the first 419 steps of the v2 run: about 2.6 hours of A100 time",
+}
+
+
+def build_toolcall_model(run: str) -> Path:
+    """The card and loss plot for a fine-tuned tool-calling model repo (the model files are already there, pushed
+    by the training notebook): ml/out/hf/toolcall-model-<run>/, published with `python ml/publish.py toolcall-<run>`."""
+    sys.path.insert(0, str(ROOT / "ml" / "hf" / "toolcall"))
+    import model_card
+    from huggingface_hub import hf_hub_download
+    repo = f"Sarthak213/doosra-qwen3.5-4b-toolcalls-{run}"
+    log = json.loads(Path(hf_hub_download(repo, "run_log.json", force_download=True)).read_text(encoding="utf-8"))
+    if log.get("exported_from"):          # exported from a saved checkpoint: the parent run's training, up to it
+        src = log["exported_from"]
+        parent = log if log.get("log_history") else json.loads(Path(hf_hub_download(
+            repo.rsplit("-", 1)[0], "run_log.json")).read_text(encoding="utf-8"))
+        total = max(h.get("step", 0) for h in parent["log_history"])
+        stop = (int(src.rsplit("step", 1)[-1]) if "step" in src
+                else round(total / parent["config"]["epochs"]) * int(src.rsplit("epoch", 1)[-1]))
+        log = {**parent, "stopped_at": stop, "total_steps": total,
+               "log_history": [h for h in parent["log_history"] if h.get("step", 0) <= stop]}
+    out = fresh(OUT / f"toolcall-model-{run}")
+    model_card.loss_plot(log, out / "training_loss.png")
+    evaluation = ROOT / "ml" / "hf" / "toolcall" / f"evaluation-{run}.md"      # written once ToolEval has results
+    (out / "README.md").write_text(model_card.card(
+        run, repo, log, evaluation.read_text(encoding="utf-8") if evaluation.exists() else None,
+        TOOLCALL_SESSIONS.get(run, f"{log.get('train_seconds', 0) / 3600:.1f} hours on the GPU")), encoding="utf-8")
+    return out
+
+
 def main() -> None:
     reports = {g: json.loads((REPORTS / g / "report.json").read_text(encoding="utf-8")) for g in ("T20", "ODI")}
     model = fresh(OUT / "winprob-model")
