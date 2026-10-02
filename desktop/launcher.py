@@ -179,7 +179,7 @@ class Bridge:
     so files the page makes (CSV exports, project exports) are saved here through a Save As dialog."""
 
     def __init__(self):
-        self.window = None
+        self._window = None      # underscore: pywebview walks a js_api object's public attributes, and the window recurses forever
 
     def save_file(self, filename: str, text: str) -> str | None:
         import webview
@@ -187,7 +187,7 @@ class Bridge:
         name = Path(str(filename)).name or "doosra.csv"
         ext = Path(name).suffix.lower()
         kinds = {".csv": "CSV file (*.csv)", ".json": "JSON file (*.json)"}
-        chosen = self.window.create_file_dialog(webview.FileDialog.SAVE, directory=str(Path.home() / "Downloads"),
+        chosen = self._window.create_file_dialog(webview.FileDialog.SAVE, directory=str(Path.home() / "Downloads"),
                                                 save_filename=name,
                                                 file_types=((kinds[ext],) if ext in kinds else ()) + ("All files (*.*)",))
         if not chosen:
@@ -209,7 +209,7 @@ def run_window(api: Api) -> None:
     webview.settings["ALLOW_DOWNLOADS"] = True     # a backstop for any plain download link
     window = webview.create_window(TITLE, api.url, width=1280, height=800, min_size=(960, 640), maximized=True,
                                    background_color="#0f1e16", js_api=bridge)
-    bridge.window = window
+    bridge._window = window
     updates.quit_app = window.destroy          # "Restart to update" in Settings closes the app this way
     # A saved profile (not private mode), kept with the app's data, so the page's own storage survives restarts.
     webview.start(private_mode=False, storage_path=str(doosra_home.home() / "webview"))

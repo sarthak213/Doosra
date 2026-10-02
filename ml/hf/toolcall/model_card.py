@@ -191,6 +191,9 @@ Validation loss fell from {first[1]:.3f} (step {first[0]}) to {best[1]:.4f} (ste
   assistant or a general tool caller, and it expects the short system prompt it was trained with.
 - **Synthetic questions.** Training questions come from templates, partly reworded; real users ask in more ways.
   The end-to-end questions are the check on that.
+- **SQL fine print.** It writes valid SQL on Doosra's schema but can miss a rule in the schema notes: asked how many
+  matches were ties, it counted `winner IS NULL`, which also includes draws and no-results. Check SQL answers to
+  unusual questions.
 - **Names as the data has them.** Cricsheet names players as "V Kohli", "JJ Bumrah"; the tools resolve most forms,
   but unusual spellings may miss.
 - **The data's coverage.** Answers are only as complete as Cricsheet: some competitions and teams are thin or missing
