@@ -131,8 +131,8 @@ def render(example):
 
 train = data["train"].map(render, remove_columns=data["train"].column_names)
 valid = data["validation"].select(range(min(50, len(data["validation"])))).map(render, remove_columns=data["validation"].column_names)
-LENS = [len(x) for x in tok(train["text"])["input_ids"]]
-vlens = [len(x) for x in tok(valid["text"])["input_ids"]]
+LENS = [len(x) for x in tok(list(train["text"]))["input_ids"]]
+vlens = [len(x) for x in tok(list(valid["text"]))["input_ids"]]
 longest = max(LENS + vlens)
 MAX_SEQ = -(-(longest + 16) // 256) * 256          # above the longest conversation: nothing is cut short
 s = sorted(LENS)
