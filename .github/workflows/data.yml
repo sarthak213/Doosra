@@ -43,12 +43,12 @@ jobs:
       - name: Download from Cricsheet
         run: |
           mkdir -p data/raw
-          curl -fsSL --retry 3 -o data/raw/all_json.zip https://cricsheet.org/downloads/all_json.zip
-          curl -fsSL --retry 3 -o data/raw/people.csv https://cricsheet.org/register/people.csv
-          curl -fsSL --retry 3 -o data/raw/names.csv https://cricsheet.org/register/names.csv
+          curl -fsSL --http1.1 --retry 3 --retry-all-errors -o data/raw/all_json.zip https://cricsheet.org/downloads/all_json.zip
+          curl -fsSL --http1.1 --retry 3 --retry-all-errors -o data/raw/people.csv https://cricsheet.org/register/people.csv
+          curl -fsSL --http1.1 --retry 3 --retry-all-errors -o data/raw/names.csv https://cricsheet.org/register/names.csv
           # Coverage and known-missing matches (web pages; ingest/coverage.py parses them)
           for p in coverage missing matches; do
-            curl -fsSL --retry 3 -o "data/raw/cricsheet_$p.html" "https://cricsheet.org/$p/"
+            curl -fsSL --http1.1 --retry 3 --retry-all-errors -o "data/raw/cricsheet_$p.html" "https://cricsheet.org/$p/"
           done
           sha256sum data/raw/*
 
