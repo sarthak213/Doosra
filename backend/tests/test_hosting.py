@@ -106,6 +106,60 @@ class TestRefresh:
             refresh._thread.join(timeout=2)
 
 
+    def test_the_desktop_app_checks_soon_after_it_opens(self, monkeypatch):
+        """Not after a whole interval: the desktop app is rarely open for a day."""
+        calls = []
+        monkeypatch.setenv("DATA_REFRESH_HOURS", "24")
+        monkeypatch.setattr(refresh, "run_once", lambda: calls.append(1))
+        assert refresh.start(first_after=0.05) is True
+        try:
+            deadline = time.time() + 5
+            while not calls and time.time() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.2)
+            assert calls == [1]                                          # once, then the next one in 24 h
+        finally:
+            refresh.stop()
+            refresh._thread.join(timeout=2)
+
+    def test_without_a_database_theres_nothing_to_refresh(self, monkeypatch):
+        from ingest import pull
+        monkeypatch.setattr(pull, "local_info", lambda *a, **k: None)
+        monkeypatch.setattr(pull, "pull", lambda *a, **k: pytest.fail("setup installs the first database"))
+        assert refresh.run_once() is False and refresh.STATUS["state"] == "idle"
+
+    def test_install_now_follows_the_download_and_reports_it(self, monkeypatch):
+        from agent import tools
+        from ingest import pull
+        builds = iter([{"built_at": "old"}, {"built_at": "new"}])
+        seen = []
+
+        def fake_pull(progress=None, stage=None, **k):
+            stage("downloading")
+            progress(5, 10)
+            seen.append(dict(refresh.STATUS))
+            stage("installing")
+            return 0
+
+        monkeypatch.setattr(pull, "local_info", lambda *a, **k: next(builds))
+        monkeypatch.setattr(pull, "pull", fake_pull)
+        monkeypatch.setattr(tools, "invalidate_caches", lambda: None)
+        monkeypatch.setattr(tools, "warm_caches", lambda: None)
+        assert refresh.install_now() is True
+        deadline = time.time() + 5
+        while refresh.STATUS["state"] != "installed" and time.time() < deadline:
+            time.sleep(0.05)
+        assert seen == [{"state": "downloading", "done": 5, "total": 10}]
+        assert refresh.STATUS == {"state": "installed", "built_at": "new"} and not refresh.busy()
+
+    def test_a_failed_install_is_reported_and_the_database_kept(self, monkeypatch):
+        from ingest import pull
+        monkeypatch.setattr(pull, "local_info", lambda *a, **k: {"built_at": "old"})
+        monkeypatch.setattr(pull, "pull", lambda *a, **k: (_ for _ in ()).throw(pull.PullError("bad download")))
+        with pytest.raises(pull.PullError):
+            refresh.run_once()
+        assert refresh.STATUS == {"state": "error", "error": "bad download"} and not refresh.busy()
+
 def test_a_local_container_can_serve_the_app_without_sign_in():
     """SERVE_FRONTEND=1 with no auth: the app is served, sign-in stays off, MCP is not mounted."""
     import os

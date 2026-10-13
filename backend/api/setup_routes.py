@@ -23,7 +23,7 @@ import setup_job
 import updates
 from version import VERSION
 from analytics import db
-from ingest import pull
+from ingest import pull, refresh
 
 router = APIRouter(prefix="/api/desktop")
 _hardware_cache: dict = {}
@@ -149,7 +149,21 @@ def check_data():
     have = pull.local_info(db.DB_PATH) or {}
     return {"installed": have.get("built_at"), "published": manifest["built_at"],
             "latest_match": manifest["latest_match"], "newer": have.get("built_at") != manifest["built_at"],
-            "download_mb": round(manifest["asset"]["bytes"] / 1e6)}
+            "download_mb": round(manifest["asset"]["bytes"] / 1e6), "install": dict(refresh.STATUS)}
+
+
+@router.post("/data/install", dependencies=[Local])
+def install_data():
+    """Download and swap in the newer database now, in the background; GET /data/install follows it."""
+    if not pull.local_info(db.DB_PATH):
+        raise HTTPException(status_code=409, detail="Finish setup first: it installs the database.")
+    refresh.install_now()
+    return dict(refresh.STATUS)
+
+
+@router.get("/data/install", dependencies=[Local])
+def install_data_status():
+    return dict(refresh.STATUS)
 
 
 @router.post("/open-folder", dependencies=[Local])

@@ -6,6 +6,8 @@ import { formatBytes, useDesktop } from "../desktop/DesktopProvider.jsx";
 
 const MODES = [["", "Automatic (GPU if it works)"], ["vulkan", "GPU"], ["vulkan-nocoopmat", "GPU, compatibility mode"], ["cpu", "CPU only"]];
 const CONTEXTS = [[8192, "8K (least memory)"], [16384, "16K (recommended)"], [32768, "32K (long chats, more memory)"]];
+// A data update's steps after the download (ingest/refresh.py STATUS); "downloading" shows its progress.
+const DATA_STEPS = { downloading: "Downloading", unpacking: "Unpacking", verifying: "Checking the download", installing: "Installing" };
 const MODE_LABEL = { vulkan: "on the GPU", "vulkan-nocoopmat": "on the GPU (compatibility mode)", cpu: "on the CPU" };
 
 // The desktop app's settings: the AI engine and model, downloaded models, the cricket data.
@@ -14,6 +16,7 @@ export default function Settings() {
   const navigate = useNavigate();
   const [message, setMessage] = useState(null);
   const [dataCheck, setDataCheck] = useState(null);
+  const [dataInstall, setDataInstall] = useState(null);
   const [busy, setBusy] = useState(false);
   const downloading = update?.download?.state === "downloading";
   useEffect(() => {                      // follow an update's download
@@ -21,6 +24,15 @@ export default function Settings() {
     const t = setInterval(() => apiGet("/api/desktop/update").then(setUpdate, () => {}), 1000);
     return () => clearInterval(t);
   }, [downloading, setUpdate]);
+  const installing = DATA_STEPS[dataInstall?.state] !== undefined;
+  useEffect(() => {                      // follow a data download until it's installed
+    if (!installing) return undefined;
+    const t = setInterval(() => apiGet("/api/desktop/data/install").then((d) => {
+      setDataInstall(d);
+      if (d.state === "installed") { setDataCheck(null); refresh(); }
+    }, () => {}), 1000);
+    return () => clearInterval(t);
+  }, [installing, refresh]);
   if (!status) return <div className="view"><p className="muted">Loading…</p></div>;
   const s = status.settings;
   const eng = status.engine;
@@ -99,16 +111,32 @@ export default function Settings() {
           install={() => run(() => apiSend("/api/desktop/update/install"), "Closing Doosra to update. It opens again when the update is done.")} />
       </Panel>
 
-      <Panel title="Cricket data" subtitle="Ball-by-ball data from Cricsheet (ODC-By 1.0), rebuilt every week. Doosra checks for a newer build once a day.">
+      <Panel title="Cricket data" subtitle="Ball-by-ball data from Cricsheet (ODC-By 1.0), rebuilt every week. Doosra checks for a newer build when it opens and once a day after that, and installs it in the background.">
         <dl className="settings-list">
           <div><dt>Installed</dt><dd>{status.data ? `Built ${status.data.built_at?.slice(0, 10)}, matches up to ${status.data.latest_match}` : "Not installed"}</dd></div>
-          {dataCheck && (
-            <div><dt>Latest</dt><dd>{dataCheck.newer ? `A newer build (${dataCheck.published.slice(0, 10)}, matches up to ${dataCheck.latest_match}) will be installed at the next daily check.` : "You have the latest build."}</dd></div>
+          {dataCheck && !installing && dataInstall?.state !== "installed" && (
+            <div><dt>Latest</dt><dd>{dataCheck.newer ? `A newer build is available (${dataCheck.published.slice(0, 10)}, matches up to ${dataCheck.latest_match}, ${dataCheck.download_mb} MB).` : "You have the latest build."}</dd></div>
           )}
+          {installing && (
+            <div><dt>Updating</dt><dd>{dataInstall.state === "downloading"
+              ? `Downloading ${formatBytes(dataInstall.done || 0)}${dataInstall.total ? ` of ${formatBytes(dataInstall.total)}` : ""}`
+              : DATA_STEPS[dataInstall.state]}. You can keep using Doosra.</dd></div>
+          )}
+          {dataInstall?.state === "installed" && <div><dt>Updated</dt><dd>The newer data is installed and in use.</dd></div>}
+          {dataInstall?.state === "error" && <div><dt>Update</dt><dd>Couldn't install the newer data: {dataInstall.error}</dd></div>}
         </dl>
         <div className="setup-actions">
-          <button type="button" className="ghost-btn" disabled={busy}
-            onClick={() => run(async () => setDataCheck(await apiGet("/api/desktop/data/check")), null)}>Check for newer data</button>
+          {dataCheck?.newer && !installing && dataInstall?.state !== "installed" ? (
+            <button type="button" className="primary-btn" disabled={busy}
+              onClick={() => run(async () => setDataInstall(await apiSend("/api/desktop/data/install")), null)}>Install now</button>
+          ) : (
+            <button type="button" className="ghost-btn" disabled={busy || installing}
+              onClick={() => run(async () => {
+                const d = await apiGet("/api/desktop/data/check");
+                setDataCheck(d);
+                setDataInstall(d.install);
+              }, null)}>Check for newer data</button>
+          )}
           <button type="button" className="ghost-btn" onClick={() => apiSend("/api/desktop/open-folder").catch((e) => setMessage(e.message))}>Open data folder</button>
         </div>
       </Panel>

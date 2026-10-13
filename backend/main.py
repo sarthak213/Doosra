@@ -71,7 +71,9 @@ def serves_ui() -> bool:
 async def lifespan(app: FastAPI):
     auth.check_config()
     tools.warm_caches()
-    refresh.start()            # a hosted instance follows the published database (DATA_REFRESH_HOURS)
+    # Follow the published database (DATA_REFRESH_HOURS). The desktop app checks soon after it opens:
+    # it's rarely open for a whole interval.
+    refresh.start(first_after=60 if desktop_app.enabled() else None)
     # The desktop app: bring up the engine chosen in setup (in the background; the window opens at once).
     if desktop_app.enabled():
         setup_job.apply_on_startup()
