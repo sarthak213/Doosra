@@ -37,8 +37,9 @@ Everything runs on your PC; questions never leave it. The AI engine is
 [llama.cpp](https://github.com/ggml-org/llama.cpp), shipped inside the app: it uses the GPU
 through Vulkan (Intel Arc, AMD, NVIDIA) and falls back to the CPU. Settings (the ⚙ in the
 masthead) switches models, GPU or CPU, and how much a conversation can hold, or uses a running
-LM Studio instead. The cricket data updates itself once a day when a new weekly build is out,
-and new versions of the app are offered in Settings (the ⚙ gets a red dot).
+LM Studio instead. The cricket data updates itself in the background when a new weekly build
+is out (Doosra checks when it opens and once a day after that, and Settings can install it at
+once), and new versions of the app are offered in Settings (the ⚙ gets a red dot).
 
 | | |
 | --- | --- |

@@ -171,6 +171,21 @@ class _FakeModelServer(BaseHTTPRequestHandler):
         pass
 
 
+class TestDataUpdate:
+    def test_needs_setup_first(self, desktop, monkeypatch):
+        monkeypatch.setattr(pull, "local_info", lambda *a, **k: None)
+        assert TestClient(main.app).post("/api/desktop/data/install").status_code == 409
+
+    def test_install_now_starts_the_update_and_reports_it(self, desktop, monkeypatch):
+        from ingest import refresh
+        started = []
+        monkeypatch.setattr(pull, "local_info", lambda *a, **k: {"built_at": "old"})
+        monkeypatch.setattr(refresh, "install_now", lambda: started.append(1) or True)
+        monkeypatch.setattr(refresh, "STATUS", {"state": "downloading", "done": 0, "total": None})
+        c = TestClient(main.app)
+        assert c.post("/api/desktop/data/install").json()["state"] == "downloading" and started == [1]
+        assert c.get("/api/desktop/data/install").json() == {"state": "downloading", "done": 0, "total": None}
+
 def test_the_setup_check_leaves_the_apps_client_usable(desktop):
     # The check runs on an event loop of its own; the next real question runs on the server's loop.
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModelServer)
