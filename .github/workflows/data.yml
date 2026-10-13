@@ -43,7 +43,16 @@ jobs:
       - name: Download from Cricsheet
         run: |
           mkdir -p data/raw
-          curl -fsSL --http1.1 --retry 3 --retry-all-errors -o data/raw/all_json.zip https://cricsheet.org/downloads/all_json.zip
+          # Cricsheet's servers sometimes send a broken file with a 200: check the zip, and fetch it again if it's bad
+          for i in 1 2 3 4 5; do
+            curl -fsSL --http1.1 --retry 3 --retry-all-errors -o data/raw/all_json.zip https://cricsheet.org/downloads/all_json.zip || true
+            if python -c "import sys, zipfile; sys.exit(zipfile.ZipFile(sys.argv[1]).testzip() is not None)" data/raw/all_json.zip 2>/dev/null; then
+              break
+            fi
+            echo "Attempt $i: not a valid zip ($(stat -c %s data/raw/all_json.zip 2>/dev/null || echo 0) bytes, starts $(head -c 60 data/raw/all_json.zip 2>/dev/null | tr -cd '[:print:]'))"
+            [ "$i" = 5 ] && exit 1
+            sleep 60
+          done
           curl -fsSL --http1.1 --retry 3 --retry-all-errors -o data/raw/people.csv https://cricsheet.org/register/people.csv
           curl -fsSL --http1.1 --retry 3 --retry-all-errors -o data/raw/names.csv https://cricsheet.org/register/names.csv
           # Coverage and known-missing matches (web pages; ingest/coverage.py parses them)
